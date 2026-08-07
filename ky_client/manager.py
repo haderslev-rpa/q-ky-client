@@ -1,5 +1,6 @@
 from ky_client.functionality.borgere import BorgereClient
 from ky_client.functionality.opgaveindbakke import OpgaveindbakkeClient
+
 from .client import KYClient
 
 

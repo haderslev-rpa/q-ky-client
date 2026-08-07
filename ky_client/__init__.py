@@ -1,9 +1,13 @@
 from .client import KYClient
-from .manager import KYClientManager
 from .functionality.borgere import BorgereClient
+from .functionality.launch import launch_ky
+from .functionality.opgaveindbakke import OpgaveindbakkeClient
+from .manager import KYClientManager
 
 __all__ = [
-    "KYClientManager",
-    "KYClient",
     "BorgereClient",
+    "KYClient",
+    "KYClientManager",
+    "OpgaveindbakkeClient",
+    "launch_ky",
 ]

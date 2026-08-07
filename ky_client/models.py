@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
-from typing import Literal, Optional
+from typing import Literal
 
 
 class IndtægterType(Enum):
@@ -46,31 +46,31 @@ class AfbrydType(Enum):
 
 @dataclass
 class Indtægter:
-    cvr_se_nummer: Optional[str] = None
-    virksomhedsnavn: Optional[str] = None
+    cvr_se_nummer: str | None = None
+    virksomhedsnavn: str | None = None
     indtaegtstype: IndtægterType = field(default=IndtægterType.VAELG_FRA_LISTE)
     beloeb: Decimal = Decimal("0.0")
     dispositionsdato: str = ""
     periode_fra: str = ""
     periode_til: str = ""
-    pensionsbidrag_eget: Optional[float] = None
-    pensionsbidrag_arbejdsgiver: Optional[float] = None
-    atp_bidrag_eget: Optional[float] = None
-    atp_bidrag_arbejdsgiver: Optional[float] = None
-    am_bidrag: Optional[float] = None
-    timer_i_perioden: Optional[int] = None
-    nettoferiepenge: Optional[float] = None
-    bruttoficerede_nettoferiepenge: Optional[float] = None
-    bruttoferiepenge_timeloennede: Optional[float] = None
-    a_indkomst_som_feriepenge: Optional[float] = None
-    soegne_og_helligdagsbetaling: Optional[float] = None
-    fri_kost_og_logi: Optional[float] = None
-    fri_bil: Optional[float] = None
-    fri_telefon: Optional[float] = None
-    sundhedsforsikring_og_gruppeliv: Optional[float] = None
-    skattefri_rejse_og_befordringsgodtgoerelse: Optional[float] = None
-    opsparet_feriefridage: Optional[float] = None
-    ydelsesarter: Optional[Ydelsesarter] = None
+    pensionsbidrag_eget: float | None = None
+    pensionsbidrag_arbejdsgiver: float | None = None
+    atp_bidrag_eget: float | None = None
+    atp_bidrag_arbejdsgiver: float | None = None
+    am_bidrag: float | None = None
+    timer_i_perioden: int | None = None
+    nettoferiepenge: float | None = None
+    bruttoficerede_nettoferiepenge: float | None = None
+    bruttoferiepenge_timeloennede: float | None = None
+    a_indkomst_som_feriepenge: float | None = None
+    soegne_og_helligdagsbetaling: float | None = None
+    fri_kost_og_logi: float | None = None
+    fri_bil: float | None = None
+    fri_telefon: float | None = None
+    sundhedsforsikring_og_gruppeliv: float | None = None
+    skattefri_rejse_og_befordringsgodtgoerelse: float | None = None
+    opsparet_feriefridage: float | None = None
+    ydelsesarter: Ydelsesarter | None = None
 
 
 @dataclass

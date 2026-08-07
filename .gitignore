@@ -25,6 +25,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.auth/
+*.jwe
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -35,7 +37,7 @@ MANIFEST
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
-
+tests_local/*
 # Unit test / coverage reports
 htmlcov/
 .tox/

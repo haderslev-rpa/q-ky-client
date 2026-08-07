@@ -170,3 +170,10 @@ class KYSelectors:
 
         # Luk alle opgaver
         LUK_ALLE_OPGAVER_FORM = "form#lukAlleOpgForm"
+
+PACKAGE_CONTROL_SELECTORS = (
+    "button[data-id='arbejdspakker']",
+    "select#arbejdspakker",
+    "select[name='arbejdspakker']",
+    # øvrige selectors...
+)

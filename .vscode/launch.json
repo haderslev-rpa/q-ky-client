@@ -1,0 +1,36 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Pytest: Kun aktiv fil",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "${file}",
+                "-s",
+                "-vv",
+                "--tb=long",
+                "--log-cli-level=INFO"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "KY_URL": "https://fs0510.fs.kommunernesydelsessystem.dk/ky-fagsystem"
+            }
+        },
+        {
+            "name": "Python: Kun aktiv fil",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "KY_URL": "https://fs0510.fs.kommunernesydelsessystem.dk/ky-fagsystem"
+            }
+        }
+    ]
+}

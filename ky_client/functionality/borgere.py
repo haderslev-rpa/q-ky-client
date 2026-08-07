@@ -1,9 +1,12 @@
 import re
-
 from decimal import Decimal
 from pathlib import Path
-from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
+
+from playwright.sync_api import Page
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from ky_client.client import KYClient
+from ky_client.models import AfbrydType, Indtægter, Journalnotat, RedigerOpgave
 from ky_client.selectors import KYSelectors
 from ky_client.utils import (
     extract_header_table,
@@ -11,8 +14,6 @@ from ky_client.utils import (
     navigate_to,
     naviger_til_borger,
 )
-from ky_client.models import Indtægter, RedigerOpgave, AfbrydType, Journalnotat
-from typing import Optional
 
 
 class BorgereClient:
@@ -279,7 +280,7 @@ class BorgereClient:
         self,
         cpr: str,
         indtægter: Indtægter,
-        journalnotat: Optional[Journalnotat] = None,
+        journalnotat: Journalnotat | None = None,
     ) -> None:
         naviger_til_borger(self._page, cpr, timeout=30000)
         self._page.locator(KYSelectors.Borgere.HANDLINGER_DROPDOWN).click(timeout=30000)
@@ -458,8 +459,10 @@ class BorgereClient:
         )
 
         return extract_header_table(self._page, "table#initierende-haendelser-table")
-    
-    def åben_opgave_og_hent_info(self, cpr: str, opgave_id: str, tabelnavn: str) -> dict:
+
+    def åben_opgave_og_hent_info(
+        self, cpr: str, opgave_id: str, tabelnavn: str
+    ) -> dict:
         """Åbner en opgave og returnerer indholdet af en navngiven tabel samt de initierende hændelser.
 
         Args:
@@ -480,8 +483,7 @@ class BorgereClient:
             initierende_hændelser = self.åbn_opgave(cpr, opgave_id)
         else:
             extract_header_table(self._page, "table#initierende-haendelser-table")
-        
-        
+
         table_id = self._page.evaluate(
             """(tabelnavn) => {
                 const normalize = (s) => (s || '').replace(/\\s+/g, ' ').trim();

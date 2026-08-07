@@ -8,13 +8,14 @@ to the KY client.
 
 import json
 import logging
-import httpx
+from collections.abc import Callable
+from typing import Any
 
-from typing import Callable, Optional, Any
+import httpx
 
 
 def create_response_logging_hook(
-    logger: Optional[logging.Logger] = None,
+    logger: logging.Logger | None = None,
 ) -> Callable[[httpx.Response], None]:
     """
     Create response logging hook that captures HTTP transactions.
@@ -68,7 +69,7 @@ def create_response_logging_hook(
     return log_response
 
 
-def _parse_json_content(content: Any) -> Optional[Any]:
+def _parse_json_content(content: Any) -> Any | None:
     """
     Parse JSON content from request/response body.
 

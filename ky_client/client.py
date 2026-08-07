@@ -1,13 +1,16 @@
-import httpx
 import logging
-
 from urllib.parse import urljoin
+
+import httpx
 from playwright.sync_api import (
-    sync_playwright,
-    Playwright,
-    Page,
     Error as PlaywrightError,
 )
+from playwright.sync_api import (
+    Page,
+    Playwright,
+    sync_playwright,
+)
+
 from .hooks import create_response_logging_hook
 from .selectors import KYSelectors
 
@@ -34,7 +37,7 @@ class KYClient:
         self._username = username
         self._password = password
         self._idp = idp
-        self._base_url = "https://fs0461.fs.kommunernesydelsessystem.dk/ky-fagsystem"
+        self._base_url = "https://fs0510.fs.kommunernesydelsessystem.dk/ky-fagsystem"
         self._timeout = 30
         self._client = httpx.Client(
             timeout=self._timeout,
@@ -46,10 +49,7 @@ class KYClient:
         )
 
         self._playwright: Playwright = sync_playwright().start()
-        browser_args = [
-            "--window-size=1920,1080",
-            "--lang=da-DK"            
-        ]
+        browser_args = ["--window-size=1920,1080", "--lang=da-DK"]
         self._browser = self._playwright.chromium.launch(
             headless=False,
             args=browser_args,
