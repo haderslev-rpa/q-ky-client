@@ -21,6 +21,160 @@ class BorgereClient:
         self._page: Page = ky_client.page
         self.p_id: str | None = None
 
+    def aabn_dokumenter_panel(self, timeout: int = 120000):
+        """Udvid Dokumenter-panelet og vent på dokumenttabellen.
+
+        Metoden arbejder på den side, som BorgereClient allerede ejer.
+        Der navigeres ikke til en anden borger eller opgave.
+        """
+
+        toggle = self._page.locator(
+            "a[role='button']"
+            "[data-toggle='collapse']"
+            "[href='#vedhaeftninger']"
+            "[aria-controls='vedhaeftninger']"
+        ).first
+
+        toggle.wait_for(
+            state="visible",
+            timeout=timeout,
+        )
+        toggle.scroll_into_view_if_needed()
+
+        if toggle.get_attribute("aria-expanded") != "true":
+            toggle.click(timeout=30000)
+
+        # KY kan have flere elementer med id=vedhaeftninger. Vent derfor
+        # direkte på en synlig dokumenttabel med mindst én synlig række.
+        table = self._wait_for_dokumenttabel(timeout=timeout)
+        return table
+
+    def aabn_pdf_dokument(
+        self,
+        dokumentnavn: str = "Kontrolark p10",
+        timeout: int = 120000,
+    ) -> Page:
+        """Find et dokument og åbn PDF'en i en ny browserfane.
+
+        Args:
+            dokumentnavn: Tekst, som skal findes i dokumentrækken.
+                Standardsøgningen er ``Kontrolark p10`` og matcher også
+                eksempelvis ``Kontrolark p10 20260730``.
+            timeout: Maksimal ventetid i millisekunder.
+
+        Returns:
+            Den nye Playwright Page, som viser PDF'en.
+        """
+
+        dokumentnavn = dokumentnavn.strip()
+        if not dokumentnavn:
+            raise ValueError("dokumentnavn må ikke være tomt.")
+
+        table = self.aabn_dokumenter_panel(timeout=timeout)
+
+        row = table.locator(
+            "tbody tr.table-row",
+            has_text=dokumentnavn,
+        ).first
+
+        row.wait_for(
+            state="visible",
+            timeout=timeout,
+        )
+
+        open_link = row.locator(
+            "a[target='_blank'][href*='aabnPdfDokument']",
+            has_text="Åbn dokument",
+        ).first
+
+        open_link.wait_for(
+            state="visible",
+            timeout=timeout,
+        )
+        open_link.scroll_into_view_if_needed()
+
+        with self._page.context.expect_page(timeout=timeout) as page_info:
+            open_link.click(timeout=30000)
+
+        pdf_page = page_info.value
+        pdf_page.bring_to_front()
+
+        try:
+            pdf_page.wait_for_load_state(
+                "domcontentloaded",
+                timeout=timeout,
+            )
+        except PlaywrightTimeoutError:
+            # Chromium PDF-vieweren sender ikke altid en normal
+            # domcontentloaded-hændelse til Playwright.
+            pass
+
+        pdf_page.bring_to_front()
+        return pdf_page
+
+    def _wait_for_dokumenttabel(self, timeout: int = 120000):
+        """Vent på en synlig dokumenttabel med mindst én synlig række."""
+
+        self._page.wait_for_function(
+            """() => {
+                const tables = Array.from(document.querySelectorAll('table'));
+
+                return tables.some(table => {
+                    const style = window.getComputedStyle(table);
+                    const visible =
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        table.offsetParent !== null;
+
+                    if (!visible) {
+                        return false;
+                    }
+
+                    const text = (table.innerText || '').toLowerCase();
+                    const looksLikeDocumentTable =
+                        text.includes('åbn dokument') ||
+                        text.includes('dokumentnavn') ||
+                        text.includes('kontrolark p10');
+
+                    if (!looksLikeDocumentTable) {
+                        return false;
+                    }
+
+                    return Array.from(table.querySelectorAll('tbody tr'))
+                        .some(row => {
+                            const rowStyle = window.getComputedStyle(row);
+                            return (
+                                rowStyle.display !== 'none' &&
+                                rowStyle.visibility !== 'hidden' &&
+                                row.offsetParent !== null &&
+                                (row.innerText || '').trim().length > 0
+                            );
+                        });
+                });
+            }""",
+            timeout=timeout,
+        )
+
+        tables = self._page.locator("table:visible")
+
+        for index in range(tables.count()):
+            table = tables.nth(index)
+            text = table.inner_text(timeout=5000).casefold()
+
+            if any(
+                marker in text
+                for marker in (
+                    "åbn dokument",
+                    "dokumentnavn",
+                    "kontrolark p10",
+                )
+            ):
+                return table
+
+        raise PlaywrightTimeoutError(
+            "Dokumenttabellen blev synlig, men kunne ikke findes igen."
+        )
+
     def _wait_for_opgave_loader_to_clear(self, timeout: int = 30000) -> None:
         self._page.wait_for_function(
             """(selector) => {

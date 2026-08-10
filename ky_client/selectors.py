@@ -26,6 +26,20 @@ class KYSelectors:
         LIVSSITUATION = "table#person-overblik-livssituation"
         LÅST_BANNER = 'div[data-textkey="system.type.advarsel_item.reserveret_af"]'
 
+        # Dokumenter på den åbnede opgave
+        DOKUMENTER_TOGGLE = (
+            "a[role='button']"
+            "[data-toggle='collapse']"
+            "[href='#vedhaeftninger']"
+            "[aria-controls='vedhaeftninger']"
+        )
+        DOKUMENTER_TABELLER = "table:visible"
+        DOKUMENTER_RAEKKER = "tbody tr.table-row"
+        DOKUMENTER_AABN_LINK = (
+            "a[target='_blank']"
+            "[href*='aabnPdfDokument']"
+        )
+
         # Navigation
         OVERBLIK = _nav("person_overblik")
         JOURNALNOTATER_DOKUMENTER = _nav("person_journalnotater_dokumenter")
