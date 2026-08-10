@@ -1,24 +1,33 @@
+"""Launch-flow for Kommunernes Ydelsessystem, KY.
+
+Modulet bruger en eksisterende asynkron Playwright-side og den fælles
+BrowserSession fra q-haderslev-vbo. Login gennemføres via den
+Fælleskommunale IDP-funktion.
+"""
+
 from __future__ import annotations
+
 import os
 import re
+from typing import Any
 
 from playwright.async_api import (
     Error as PlaywrightError,
-)
-from playwright.async_api import (
+    Locator,
     Page,
-)
-from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
+from q_haderslev_vbo.playwright.browser_session import BrowserSession
 from q_haderslev_vbo.playwright.faelles_kommunal_login_idp import (
     login_via_faelles_kommunal_idp,
 )
+
 
 KY_URL = os.getenv(
     "KY_URL",
     "https://fs0510.fs.kommunernesydelsessystem.dk/ky-fagsystem",
 ).strip()
+
 KY_MUNICIPALITY = os.getenv(
     "KY_MUNICIPALITY",
     "Haderslev Kommune",
@@ -27,25 +36,48 @@ KY_MUNICIPALITY = os.getenv(
 KY_DOMAIN = "kommunernesydelsessystem.dk"
 KY_PATH = "/ky-fagsystem"
 KY_ERROR_PATH = "/ky-fagsystem/errors"
+
 AUTH_DROPDOWN = "select#SelectedAuthenticationUrl"
+
+# Kun relevante OK/Vælg-knapper. Der vælges efterfølgende kun en knap,
+# som både er synlig og aktiv.
 OK_BUTTON = (
     "input[type='button'][value='OK'], "
     "input[type='submit'][value='OK'], "
     "input[type='button'][value='Vælg'], "
     "input[type='submit'][value='Vælg'], "
     "button:has-text('OK'), "
-    "button:has-text('Vælg'), "
-    "button[type='submit'], "
-    "input[type='submit']"
+    "button:has-text('Vælg')"
 )
 
-NAVIGATION_TIMEOUT_MS = int(os.getenv("KY_NAVIGATION_TIMEOUT_MS", "60000"))
-ACTION_TIMEOUT_MS = int(os.getenv("KY_ACTION_TIMEOUT_MS", "15000"))
-WAIT_AFTER_GOTO_MS = int(os.getenv("KY_WAIT_AFTER_GOTO_MS", "1500"))
-WAIT_AFTER_MUNICIPALITY_MS = int(os.getenv("KY_WAIT_AFTER_MUNICIPALITY_MS", "1000"))
-WAIT_AFTER_CONTINUE_MS = int(os.getenv("KY_WAIT_AFTER_CONTINUE_MS", "2000"))
-WAIT_BEFORE_IDP_LOGIN_MS = int(os.getenv("KY_WAIT_BEFORE_IDP_LOGIN_MS", "1500"))
-WAIT_AFTER_IDP_LOGIN_MS = int(os.getenv("KY_WAIT_AFTER_IDP_LOGIN_MS", "3000"))
+NAVIGATION_TIMEOUT_MS = int(
+    os.getenv("KY_NAVIGATION_TIMEOUT_MS", "120000")
+)
+ACTION_TIMEOUT_MS = int(
+    os.getenv("KY_ACTION_TIMEOUT_MS", "30000")
+)
+LOGIN_TIMEOUT_MS = int(
+    os.getenv("KY_LOGIN_TIMEOUT_MS", "120000")
+)
+POLL_INTERVAL_MS = int(
+    os.getenv("KY_POLL_INTERVAL_MS", "500")
+)
+
+WAIT_AFTER_GOTO_MS = int(
+    os.getenv("KY_WAIT_AFTER_GOTO_MS", "1500")
+)
+WAIT_AFTER_MUNICIPALITY_MS = int(
+    os.getenv("KY_WAIT_AFTER_MUNICIPALITY_MS", "1000")
+)
+WAIT_AFTER_CONTINUE_MS = int(
+    os.getenv("KY_WAIT_AFTER_CONTINUE_MS", "2000")
+)
+WAIT_BEFORE_IDP_LOGIN_MS = int(
+    os.getenv("KY_WAIT_BEFORE_IDP_LOGIN_MS", "1500")
+)
+WAIT_AFTER_IDP_LOGIN_MS = int(
+    os.getenv("KY_WAIT_AFTER_IDP_LOGIN_MS", "3000")
+)
 
 
 class KyLaunchError(RuntimeError):
@@ -53,29 +85,32 @@ class KyLaunchError(RuntimeError):
 
 
 async def optional_screenshot(
-    session,
+    session: BrowserSession,
+    page: Page,
     name: str,
 ) -> None:
-    """Anmod sessionens recorder om et billede, hvis aktivt.
+    """Tag et valgfrit screenshot gennem BrowserSession.
 
-    Recorderens egen konfiguration afgør, om der faktisk tages et billede.
-    Fejl herfra må aldrig stoppe launch-flowet.
+    BrowserSession er den offentlige grænseflade. Recorderens screenshot-
+    metode kaldes derfor ikke direkte. Screenshot-fejl må ikke stoppe
+    launch-flowet.
     """
 
-    recorder = getattr(session, "recorder", None)
-
-    if recorder is None:
-        return
-
-    screenshot_method = getattr(recorder, "screenshot", None)
+    screenshot_method = getattr(session, "screenshot", None)
 
     if not callable(screenshot_method):
         return
 
     try:
-        await screenshot_method(name)
+        await screenshot_method(
+            page=page,
+            name=name,
+        )
     except Exception as error:
-        print(f"Valgfrit skærmbillede fejlede: {type(error).__name__}: {error}")
+        print(
+            "Valgfrit skærmbillede fejlede: "
+            f"{type(error).__name__}: {error}"
+        )
 
 
 async def wait_between_steps(
@@ -86,13 +121,17 @@ async def wait_between_steps(
     """Vent kontrolleret og kontrollér, at siden stadig er åben."""
 
     if page.is_closed():
-        raise KyLaunchError(f"Siden blev lukket før trinnet '{stage}'.")
+        raise KyLaunchError(
+            f"Siden blev lukket før trinnet '{stage}'."
+        )
 
     if delay_ms > 0:
         await page.wait_for_timeout(delay_ms)
 
     if page.is_closed():
-        raise KyLaunchError(f"Siden blev lukket under trinnet '{stage}'.")
+        raise KyLaunchError(
+            f"Siden blev lukket under trinnet '{stage}'."
+        )
 
 
 async def wait_for_page_ready(
@@ -109,16 +148,19 @@ async def wait_for_page_ready(
             "domcontentloaded",
             timeout=timeout_ms,
         )
+        return
     except PlaywrightTimeoutError:
-        try:
-            ready = await page.evaluate(
-                "() => Boolean(document && document.documentElement)"
-            )
-        except PlaywrightError as error:
-            raise KyLaunchError("Siden blev ikke klar.") from error
+        pass
 
-        if not ready:
-            raise KyLaunchError("Siden blev ikke klar.")
+    try:
+        ready = await page.evaluate(
+            "() => Boolean(document && document.documentElement)"
+        )
+    except PlaywrightError as error:
+        raise KyLaunchError("Siden blev ikke klar.") from error
+
+    if not ready:
+        raise KyLaunchError("Siden blev ikke klar.")
 
 
 def is_ky_url(page: Page) -> bool:
@@ -128,6 +170,7 @@ def is_ky_url(page: Page) -> bool:
         return False
 
     url = page.url.casefold()
+
     return (
         KY_DOMAIN.casefold() in url
         and KY_PATH.casefold() in url
@@ -138,11 +181,14 @@ def is_ky_url(page: Page) -> bool:
 def is_ky_error_url(page: Page) -> bool:
     """Returnér True, hvis KY viser fejlsiden."""
 
-    return not page.is_closed() and KY_ERROR_PATH.casefold() in page.url.casefold()
+    return (
+        not page.is_closed()
+        and KY_ERROR_PATH.casefold() in page.url.casefold()
+    )
 
 
 async def has_jsessionid(page: Page) -> bool:
-    """Kontrollér om browser-contexten har JSESSIONID."""
+    """Kontrollér om browser-contexten har en aktiv JSESSIONID."""
 
     if page.is_closed():
         return False
@@ -153,7 +199,8 @@ async def has_jsessionid(page: Page) -> bool:
         return False
 
     return any(
-        cookie.get("name", "").casefold() == "jsessionid" and bool(cookie.get("value"))
+        cookie.get("name", "").casefold() == "jsessionid"
+        and bool(cookie.get("value"))
         for cookie in cookies
     )
 
@@ -184,7 +231,10 @@ async def raise_if_ky_error(
     except (PlaywrightError, PlaywrightTimeoutError):
         pass
 
-    message = f"KY viste en fejlside under '{stage}'. URL: {page.url}"
+    message = (
+        f"KY viste en fejlside under '{stage}'. "
+        f"URL: {page.url}"
+    )
 
     if body_text:
         message += f". Fejltekst: {body_text[:500]}"
@@ -194,24 +244,38 @@ async def raise_if_ky_error(
 
 async def wait_for_ky_ready(
     page: Page,
-    timeout_ms: int = NAVIGATION_TIMEOUT_MS,
+    timeout_ms: int = LOGIN_TIMEOUT_MS,
 ) -> None:
     """Vent på gyldig KY-URL og aktiv JSESSIONID."""
 
     elapsed_ms = 0
-    interval_ms = 500
 
     while elapsed_ms < timeout_ms:
-        await raise_if_ky_error(page, "vent på KY-session")
+        if page.is_closed():
+            raise KyLaunchError(
+                "Browserfanen blev lukket under ventetiden på KY."
+            )
+
+        await raise_if_ky_error(
+            page,
+            "vent på KY-session",
+        )
 
         if await is_logged_in(page):
-            await wait_for_page_ready(page, timeout_ms)
+            await wait_for_page_ready(
+                page,
+                timeout_ms,
+            )
             return
 
-        await page.wait_for_timeout(interval_ms)
-        elapsed_ms += interval_ms
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
 
-    raise KyLaunchError(f"KY blev ikke klar efter login. Aktuel URL: {page.url}")
+    raise KyLaunchError(
+        "KY blev ikke klar efter login inden for "
+        f"{timeout_ms / 1000:.0f} sekunder. "
+        f"Aktuel URL: {page.url}"
+    )
 
 
 async def select_municipality_and_continue(page: Page) -> None:
@@ -225,10 +289,13 @@ async def select_municipality_and_continue(page: Page) -> None:
             timeout=ACTION_TIMEOUT_MS,
         )
     except PlaywrightTimeoutError:
+        # Kommunevælgeren vises ikke nødvendigvis ved en eksisterende session.
         return
 
     try:
-        await dropdown.select_option(label=KY_MUNICIPALITY)
+        await dropdown.select_option(
+            label=KY_MUNICIPALITY,
+        )
     except PlaywrightError as error:
         raise KyLaunchError(
             f"Kommunen '{KY_MUNICIPALITY}' kunne ikke vælges."
@@ -240,18 +307,10 @@ async def select_municipality_and_continue(page: Page) -> None:
         "efter valg af kommune",
     )
 
-    buttons = page.locator(OK_BUTTON)
-    selected_button = None
-
-    for index in range(await buttons.count()):
-        candidate = buttons.nth(index)
-
-        if await candidate.is_visible() and await candidate.is_enabled():
-            selected_button = candidate
-            break
-
-    if selected_button is None:
-        raise KyLaunchError("En synlig OK/Vælg-knap blev ikke fundet.")
+    selected_button = await _find_visible_enabled_button(
+        page=page,
+        timeout_ms=ACTION_TIMEOUT_MS,
+    )
 
     await selected_button.click(timeout=ACTION_TIMEOUT_MS)
 
@@ -261,32 +320,39 @@ async def select_municipality_and_continue(page: Page) -> None:
         "efter klik på OK/Vælg",
     )
 
-    await raise_if_ky_error(page, "valg af kommune")
+    await raise_if_ky_error(
+        page,
+        "valg af kommune",
+    )
 
 
 async def launch_ky(
     page: Page,
-    session,
+    session: BrowserSession,
     credential_name: str,
 ) -> None:
     """Åbn KY og gennemfør login via Fælleskommunal IDP.
 
     ``credential_name`` er navnet på credential-posten i Automation Server.
     Selve credential-opslaget håndteres af
-    ``login_via_faelles_kommunal_idp`` på samme måde som i FASIT-launch.
+    ``login_via_faelles_kommunal_idp``.
     """
 
     if page.is_closed():
         raise KyLaunchError("Playwright-siden er lukket.")
 
-    if not credential_name.strip():
+    credential_name = credential_name.strip()
+
+    if not credential_name:
         raise KyLaunchError("credential_name må ikke være tomt.")
 
-    recorder = getattr(session, "recorder", None)
-    set_page = getattr(recorder, "set_page", None)
+    _set_session_page(
+        session=session,
+        page=page,
+    )
 
-    if callable(set_page):
-        set_page(page)
+    page.set_default_timeout(ACTION_TIMEOUT_MS)
+    page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
 
     try:
         if await is_logged_in(page):
@@ -303,15 +369,26 @@ async def launch_ky(
             WAIT_AFTER_GOTO_MS,
             "efter åbning af KY",
         )
+
         await wait_for_page_ready(page)
         await raise_if_ky_error(page, "åbning af KY")
-        await optional_screenshot(session, "01_ky_aabnet")
+
+        await optional_screenshot(
+            session=session,
+            page=page,
+            name="01_ky_aabnet",
+        )
 
         if await is_logged_in(page):
             return
 
         await select_municipality_and_continue(page)
-        await optional_screenshot(session, "02_kommune_valgt")
+
+        await optional_screenshot(
+            session=session,
+            page=page,
+            name="02_kommune_valgt",
+        )
 
         if await is_logged_in(page):
             return
@@ -321,7 +398,12 @@ async def launch_ky(
             WAIT_BEFORE_IDP_LOGIN_MS,
             "før IDP-login",
         )
-        await optional_screenshot(session, "03_foer_idp_login")
+
+        await optional_screenshot(
+            session=session,
+            page=page,
+            name="03_foer_idp_login",
+        )
 
         await login_via_faelles_kommunal_idp(
             page=page,
@@ -334,28 +416,88 @@ async def launch_ky(
             WAIT_AFTER_IDP_LOGIN_MS,
             "efter IDP-login",
         )
-        await optional_screenshot(session, "04_efter_idp_login")
+
+        await optional_screenshot(
+            session=session,
+            page=page,
+            name="04_efter_idp_login",
+        )
 
         await wait_for_ky_ready(page)
-        await optional_screenshot(session, "05_ky_logget_ind")
+
+        await optional_screenshot(
+            session=session,
+            page=page,
+            name="05_ky_logget_ind",
+        )
 
     except KyLaunchError:
         raise
+
     except PlaywrightTimeoutError as error:
         raise KyLaunchError(
             "KY-launch overskred tidsgrænsen. "
             f"Underliggende fejl: {type(error).__name__}: {error}. "
             f"Aktuel URL: {page.url}"
         ) from error
+
     except PlaywrightError as error:
         raise KyLaunchError(
             "Playwright fejlede under KY-launch. "
             f"Underliggende fejl: {type(error).__name__}: {error}. "
             f"Aktuel URL: {page.url}"
         ) from error
+
     except Exception as error:
         raise KyLaunchError(
             "Login via Fælleskommunal IDP fejlede. "
             f"Underliggende fejl: {type(error).__name__}: {error}. "
             f"Aktuel URL: {page.url}"
         ) from error
+
+
+async def _find_visible_enabled_button(
+    page: Page,
+    timeout_ms: int,
+) -> Locator:
+    """Find den første synlige og aktive OK/Vælg-knap."""
+
+    elapsed_ms = 0
+
+    while elapsed_ms < timeout_ms:
+        for frame in page.frames:
+            try:
+                buttons = frame.locator(OK_BUTTON)
+
+                for index in range(await buttons.count()):
+                    candidate = buttons.nth(index)
+
+                    if not await candidate.is_visible():
+                        continue
+
+                    if not await candidate.is_enabled():
+                        continue
+
+                    return candidate
+            except PlaywrightError:
+                continue
+
+        await page.wait_for_timeout(250)
+        elapsed_ms += 250
+
+    raise KyLaunchError(
+        "En synlig og aktiv OK/Vælg-knap blev ikke fundet."
+    )
+
+
+def _set_session_page(
+    session: BrowserSession,
+    page: Page,
+) -> None:
+    """Knyt BrowserSessions recorder til den aktive Playwright-side."""
+
+    recorder = getattr(session, "recorder", None)
+    set_page = getattr(recorder, "set_page", None)
+
+    if callable(set_page):
+        set_page(page)
