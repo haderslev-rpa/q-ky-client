@@ -645,9 +645,9 @@ class OpgaveindbakkeClient:
         encoded_task_id = quote(task_id, safe="")
 
         if url.casefold().endswith("%27"):
-            return url[:-3] + "cb&opgaveId=" + encoded_task_id
+            return url[:-3] + "&opgaveId=" + encoded_task_id
 
-        return url + "cb&opgaveId=" + encoded_task_id
+        return url + "&opgaveId=" + encoded_task_id
 
     @staticmethod
     def _package_pattern(package_name: str) -> re.Pattern[str]:
