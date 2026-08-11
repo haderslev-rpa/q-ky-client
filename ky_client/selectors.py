@@ -26,12 +26,10 @@ class KYSelectors:
         LIVSSITUATION = "table#person-overblik-livssituation"
         LÅST_BANNER = 'div[data-textkey="system.type.advarsel_item.reserveret_af"]'
 
-        # Dokumenter på den åbnede opgave
+        #Dokumenter på den åbnede opgave
         DOKUMENTER_TOGGLE = (
-            "a[role='button']"
-            "[data-toggle='collapse']"
-            "[href='#vedhaeftninger']"
-            "[aria-controls='vedhaeftninger']"
+            "a[data-toggle='collapse']"
+            ":has(span.panel-title:has-text('Dokumenter'))"
         )
         DOKUMENTER_TABELLER = "table:visible"
         DOKUMENTER_RAEKKER = "tbody tr.table-row"
