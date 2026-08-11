@@ -22,17 +22,10 @@ class BorgereClient:
         self.p_id: str | None = None
 
     def aabn_dokumenter_panel(self, timeout: int = 120000):
-        """Udvid Dokumenter-panelet og vent på dokumenttabellen.
-
-        Metoden arbejder på den side, som BorgereClient allerede ejer.
-        Der navigeres ikke til en anden borger eller opgave.
-        """
+        """Udvid Dokumenter-panelet og returner den synlige dokumenttabel."""
 
         toggle = self._page.locator(
-            "a[role='button']"
-            "[data-toggle='collapse']"
-            "[href='#vedhaeftninger']"
-            "[aria-controls='vedhaeftninger']"
+            KYSelectors.Borgere.DOKUMENTER_TOGGLE
         ).first
 
         toggle.wait_for(
@@ -41,63 +34,143 @@ class BorgereClient:
         )
         toggle.scroll_into_view_if_needed()
 
+        synlig_tekst = re.sub(
+            r"\s+",
+            " ",
+            toggle.inner_text(),
+        ).strip()
+
+        print()
+        print("=" * 70)
+        print("DOKUMENTER-KNAPPEN ER FUNDET")
+        print(f"Synlig tekst: {synlig_tekst}")
+        print(f"Aktiv URL: {self._page.url}")
+        print("=" * 70)
+
         if toggle.get_attribute("aria-expanded") != "true":
             toggle.click(timeout=30000)
 
-        # KY kan have flere elementer med id=vedhaeftninger. Vent derfor
-        # direkte på en synlig dokumenttabel med mindst én synlig række.
-        table = self._wait_for_dokumenttabel(timeout=timeout)
-        return table
+        self._wait_for_toggle_expanded(
+            toggle=toggle,
+            timeout=30000,
+        )
+
+        print("Dokumenter-panelet er udvidet.")
+
+        return self._wait_for_dokumenttabel(timeout=timeout)
 
     def aabn_pdf_dokument(
         self,
-        dokumentnavn: str = "Kontrolark p10",
+        dokumentnavn: str,
         timeout: int = 120000,
     ) -> Page:
-        """Find et dokument og åbn PDF'en i en ny browserfane.
-
-        Args:
-            dokumentnavn: Tekst, som skal findes i dokumentrækken.
-                Standardsøgningen er ``Kontrolark p10`` og matcher også
-                eksempelvis ``Kontrolark p10 20260730``.
-            timeout: Maksimal ventetid i millisekunder.
-
-        Returns:
-            Den nye Playwright Page, som viser PDF'en.
-        """
 
         dokumentnavn = dokumentnavn.strip()
+
         if not dokumentnavn:
             raise ValueError("dokumentnavn må ikke være tomt.")
 
         table = self.aabn_dokumenter_panel(timeout=timeout)
-
-        row = table.locator(
-            "tbody tr.table-row",
-            has_text=dokumentnavn,
-        ).first
-
-        row.wait_for(
-            state="visible",
-            timeout=timeout,
+        rows = table.locator(
+            KYSelectors.Borgere.DOKUMENTER_RAEKKER
         )
 
-        open_link = row.locator(
-            "a[target='_blank'][href*='aabnPdfDokument']",
-            has_text="Åbn dokument",
-        ).first
+        row_count = rows.count()
 
-        open_link.wait_for(
-            state="visible",
-            timeout=timeout,
+        print()
+        print("=" * 70)
+        print("SYNLIGE DOKUMENTRÆKKER")
+        print(f"Antal rækker fundet: {row_count}")
+        print(f"Søger efter: {dokumentnavn}")
+        print("=" * 70)
+
+        selected_row = None
+        wanted_text = dokumentnavn.casefold()
+
+        for index in range(row_count):
+            row = rows.nth(index)
+
+            try:
+                if not row.is_visible():
+                    continue
+
+                row_text = re.sub(
+                    r"\s+",
+                    " ",
+                    row.inner_text(timeout=5000),
+                ).strip()
+            except PlaywrightTimeoutError:
+                print(f"Række {index + 1}: kunne ikke læses inden timeout")
+                continue
+
+            print(f"Række {index + 1}: {row_text}")
+
+            if wanted_text in row_text.casefold():
+                selected_row = row
+                print(
+                    f"MATCH: Række {index + 1} indeholder "
+                    f"'{dokumentnavn}'."
+                )
+                break
+
+        if selected_row is None:
+            raise ValueError(
+                f"Kunne ikke finde en synlig dokumentrække med "
+                f"'{dokumentnavn}'."
+            )
+
+        open_links = selected_row.locator(
+            KYSelectors.Borgere.DOKUMENTER_AABN_LINK
         )
-        open_link.scroll_into_view_if_needed()
+
+        selected_link = None
+
+        for index in range(open_links.count()):
+            link = open_links.nth(index)
+
+            if not link.is_visible():
+                continue
+
+            if not link.is_enabled():
+                continue
+
+            link_text = re.sub(
+                r"\s+",
+                " ",
+                link.inner_text(timeout=5000),
+            ).strip()
+
+            print(
+                f"Link {index + 1} i dokumentrækken: "
+                f"{link_text or '[uden synlig tekst]'}"
+            )
+
+            if "åbn dokument" in link_text.casefold():
+                selected_link = link
+                break
+
+        if selected_link is None:
+            raise ValueError(
+                f"Rækken med '{dokumentnavn}' indeholder ikke et synligt "
+                "og aktivt link med teksten 'Åbn dokument'."
+            )
+
+        selected_link.scroll_into_view_if_needed()
+
+        print()
+        print("Klikker på 'Åbn dokument'...")
+        print(f"URL før klik: {self._page.url}")
 
         with self._page.context.expect_page(timeout=timeout) as page_info:
-            open_link.click(timeout=30000)
+            selected_link.click(timeout=30000)
 
         pdf_page = page_info.value
         pdf_page.bring_to_front()
+
+        self._wait_for_pdf_url(
+            pdf_page=pdf_page,
+            timeout=timeout,
+        )
 
         try:
             pdf_page.wait_for_load_state(
@@ -105,74 +178,164 @@ class BorgereClient:
                 timeout=timeout,
             )
         except PlaywrightTimeoutError:
-            # Chromium PDF-vieweren sender ikke altid en normal
-            # domcontentloaded-hændelse til Playwright.
+            # Chromium PDF-vieweren sender ikke altid domcontentloaded.
             pass
 
         pdf_page.bring_to_front()
+
+        print()
+        print("=" * 70)
+        print("PDF-DOKUMENTET ER ÅBNET")
+        print(f"Dokumentnavn: {dokumentnavn}")
+        print(f"Ny PDF-URL: {pdf_page.url}")
+        print("=" * 70)
+
         return pdf_page
 
     def _wait_for_dokumenttabel(self, timeout: int = 120000):
-        """Vent på en synlig dokumenttabel med mindst én synlig række."""
+        """Vent på dokumenttabellen og print alle synlige rækker."""
 
-        self._page.wait_for_function(
-            """() => {
-                const tables = Array.from(document.querySelectorAll('table'));
+        elapsed_ms = 0
+        poll_interval_ms = 500
 
-                return tables.some(table => {
-                    const style = window.getComputedStyle(table);
-                    const visible =
-                        style.display !== 'none' &&
-                        style.visibility !== 'hidden' &&
-                        table.offsetParent !== null;
+        while elapsed_ms < timeout:
+            tables = self._page.locator(
+                KYSelectors.Borgere.DOKUMENTER_TABELLER
+            )
 
-                    if (!visible) {
-                        return false;
-                    }
+            for table_index in range(tables.count()):
+                table = tables.nth(table_index)
 
-                    const text = (table.innerText || '').toLowerCase();
-                    const looksLikeDocumentTable =
-                        text.includes('åbn dokument') ||
-                        text.includes('dokumentnavn') ||
-                        text.includes('kontrolark p10');
+                try:
+                    if not table.is_visible():
+                        continue
 
-                    if (!looksLikeDocumentTable) {
-                        return false;
-                    }
+                    rows = table.locator(
+                        KYSelectors.Borgere.DOKUMENTER_RAEKKER
+                    )
 
-                    return Array.from(table.querySelectorAll('tbody tr'))
-                        .some(row => {
-                            const rowStyle = window.getComputedStyle(row);
-                            return (
-                                rowStyle.display !== 'none' &&
-                                rowStyle.visibility !== 'hidden' &&
-                                row.offsetParent !== null &&
-                                (row.innerText || '').trim().length > 0
-                            );
-                        });
-                });
-            }""",
-            timeout=timeout,
-        )
+                    visible_row_texts = []
 
-        tables = self._page.locator("table:visible")
+                    for row_index in range(rows.count()):
+                        row = rows.nth(row_index)
 
-        for index in range(tables.count()):
-            table = tables.nth(index)
-            text = table.inner_text(timeout=5000).casefold()
+                        if not row.is_visible():
+                            continue
 
-            if any(
-                marker in text
-                for marker in (
-                    "åbn dokument",
-                    "dokumentnavn",
-                    "kontrolark p10",
-                )
-            ):
-                return table
+                        row_text = re.sub(
+                            r"\s+",
+                            " ",
+                            row.inner_text(timeout=5000),
+                        ).strip()
+
+                        if row_text:
+                            visible_row_texts.append(row_text)
+
+                    if not visible_row_texts:
+                        continue
+
+                    joined_text = " ".join(visible_row_texts).casefold()
+
+                    looks_like_document_table = any(
+                        marker in joined_text
+                        for marker in (
+                            "åbn dokument",
+                            "dokumentnavn",
+                            "kontrolark p10",
+                        )
+                    )
+
+                    if not looks_like_document_table:
+                        continue
+
+                    print()
+                    print("=" * 70)
+                    print("DOKUMENTTABEL FUNDET")
+                    print(f"Tabelnummer: {table_index + 1}")
+                    print(f"Synlige rækker: {len(visible_row_texts)}")
+
+                    for row_number, row_text in enumerate(
+                        visible_row_texts,
+                        start=1,
+                    ):
+                        print(f"  {row_number}: {row_text}")
+
+                    print("=" * 70)
+                    return table
+
+                except PlaywrightTimeoutError:
+                    continue
+
+            self._page.wait_for_timeout(poll_interval_ms)
+            elapsed_ms += poll_interval_ms
 
         raise PlaywrightTimeoutError(
-            "Dokumenttabellen blev synlig, men kunne ikke findes igen."
+            "Dokumenttabellen blev ikke synlig med læsbare rækker inden "
+            f"for {timeout / 1000:.0f} sekunder. URL: {self._page.url}"
+        )
+
+    def _wait_for_toggle_expanded(
+        self,
+        toggle,
+        timeout: int,
+    ) -> None:
+        """Vent på at Dokumenter-panelet har aria-expanded=true."""
+
+        elapsed_ms = 0
+        poll_interval_ms = 250
+
+        while elapsed_ms < timeout:
+            try:
+                if toggle.get_attribute("aria-expanded") == "true":
+                    return
+            except PlaywrightTimeoutError:
+                pass
+
+            self._page.wait_for_timeout(poll_interval_ms)
+            elapsed_ms += poll_interval_ms
+
+        raise PlaywrightTimeoutError(
+            "Dokumenter-panelet blev ikke udvidet efter klik."
+        )
+
+    def _wait_for_pdf_url(
+        self,
+        pdf_page: Page,
+        timeout: int,
+    ) -> None:
+        """Vent på at den nye PDF-fane får en reel URL, og print URL-skift."""
+
+        elapsed_ms = 0
+        poll_interval_ms = 250
+        previous_url = pdf_page.url
+
+        print(f"PDF-fanens start-URL: {previous_url}")
+
+        while elapsed_ms < timeout:
+            if pdf_page.is_closed():
+                raise RuntimeError(
+                    "PDF-browserfanen blev lukket under åbningen."
+                )
+
+            current_url = pdf_page.url
+
+            if current_url != previous_url:
+                print(
+                    "PDF-URL skiftede: "
+                    f"{previous_url} -> {current_url}"
+                )
+                previous_url = current_url
+
+            if current_url not in ("", "about:blank"):
+                print(f"PDF-URL er indlæst: {current_url}")
+                return
+
+            pdf_page.wait_for_timeout(poll_interval_ms)
+            elapsed_ms += poll_interval_ms
+
+        raise PlaywrightTimeoutError(
+            "PDF-browserfanen fik ikke en reel URL inden for "
+            f"{timeout / 1000:.0f} sekunder."
         )
 
     def _wait_for_opgave_loader_to_clear(self, timeout: int = 30000) -> None:
