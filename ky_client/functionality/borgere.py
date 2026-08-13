@@ -2,6 +2,9 @@ import re
 from decimal import Decimal
 from pathlib import Path
 
+from playwright.async_api import Page as AsyncPage
+from playwright.async_api import TimeoutError as AsyncPlaywrightTimeoutError
+
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -989,3 +992,666 @@ class BorgereClient:
 def _to_danish_decimal(val: float | Decimal) -> str:
     # Converts 6509.73 -> '6.509,73' (Danish format)
     return f"{val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+"""Indsæt metoderne i den eksisterende BorgereClient-klasse i borgere.py.
+
+Forudsætninger i borgere.py:
+    import re
+    from playwright.sync_api import Page
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from ky_client.selectors import KYSelectors
+
+Funktionen går ud fra, at borgeren allerede er fremsøgt og aktiv i KY.
+"""
+
+def opret_opfoelgningsopgave(
+        self,
+        opfoelgningstype: str,
+        opfoelgningsdato: str,
+        sagsbehandler: str,
+        titel: str | None = None,
+        frekvens: str | None = None,
+        haendelsestype: str | None = None,
+        beskrivelse: str | None = None,
+        journalnotat: Journalnotat | None = None,
+        timeout: int = 120000,
+    ) -> None:
+        """Opret en opfølgningsopgave på den allerede fremsøgte borger.
+
+        Args:
+            opfoelgningstype:
+                Den synlige tekst eller option-værdi i feltet
+                ``select#opfoelgningsType``. Eksempler:
+                - ``Ingen valgt``
+                - ``Brugerdefineret``
+                - ``Udbetal Refusion til arbejdsgiver``
+                - ``manuel``
+                - ``standard_opfoelgningsopgave-OJ0441``
+            opfoelgningsdato:
+                Dato til ``input#command\\.opfoelgningsdato``.
+            sagsbehandler:
+                Det fulde synlige navn, som skrives i ``input#typeahead``.
+                Funktionen klikker derefter et præcist match i typeahead-listen.
+            titel:
+                Titel til ``input#title``. Kræves ved Brugerdefineret.
+            frekvens:
+                Synlig tekst eller værdi i ``select#frekvens``.
+                Eksempler: ``Aldrig``, ``NEVER``, ``Månedligt``, ``MONTHLY``.
+                Kræves ved Brugerdefineret.
+            haendelsestype:
+                Synlig tekst eller værdi i ``select#haendelseType``.
+                Eksempler: ``Ingen valgt``, ``Skriv journalnotat`` eller
+                ``HD_SKRIV_JOURNALNOTAT``.
+            beskrivelse:
+                Tekst til ``textarea#beskrivelse``.
+            journalnotat:
+                Eksisterende ``Journalnotat``-model. Journalnotat-sektionen
+                udvides og udfyldes kun, når et objekt angives.
+            timeout:
+                Maksimal ventetid i millisekunder.
+        """
+
+        opfoelgningstype = opfoelgningstype.strip()
+        opfoelgningsdato = opfoelgningsdato.strip()
+        sagsbehandler = sagsbehandler.strip()
+        titel = titel.strip() if titel else None
+        frekvens = frekvens.strip() if frekvens else None
+        haendelsestype = haendelsestype.strip() if haendelsestype else None
+        beskrivelse = beskrivelse.strip() if beskrivelse else None
+
+        if not opfoelgningstype:
+            raise ValueError("opfoelgningstype må ikke være tom.")
+        if not opfoelgningsdato:
+            raise ValueError("opfoelgningsdato må ikke være tom.")
+        if not sagsbehandler:
+            raise ValueError("sagsbehandler må ikke være tom.")
+
+        # ------------------------------------------------------
+        # Handlinger > Administration > Opret opfølgningsopgave
+        # ------------------------------------------------------
+
+        handlinger = self._page.locator(
+            KYSelectors.Borgere.HANDLINGER_DROPDOWN
+        ).first
+        handlinger.wait_for(state="visible", timeout=timeout)
+        handlinger.scroll_into_view_if_needed()
+        handlinger.click(timeout=30000)
+
+        administration = self._find_handlinger_menu_item_sync(
+            text="Administration",
+            timeout=timeout,
+        )
+        administration.click(timeout=30000)
+
+        opret_opgave = self._find_handlinger_menu_item_sync(
+            text="Opret opfølgningsopgave",
+            timeout=timeout,
+        )
+        opret_opgave.click(timeout=30000)
+
+        # ------------------------------------------------------
+        # Vent på at opgave-loaderen er væk og formularen er klar
+        # ------------------------------------------------------
+
+        self._wait_for_empty_opgave_loader_to_clear(timeout=timeout)
+
+        opfoelgningstype_selector = "select#opfoelgningsType"
+        self._page.locator(opfoelgningstype_selector).wait_for(
+            state="attached",
+            timeout=timeout,
+        )
+
+        self._select_option_by_value_or_label(
+            selector=opfoelgningstype_selector,
+            option=opfoelgningstype,
+        )
+
+        # Vent på at KY har reageret på opfølgningstypen.
+        self._page.wait_for_timeout(500)
+        self._wait_for_empty_opgave_loader_to_clear(timeout=timeout)
+
+        is_custom = self._opfoelgningstype_er_brugerdefineret(
+            opfoelgningstype_selector
+        )
+
+        # ------------------------------------------------------
+        # Fælles obligatoriske felter
+        # ------------------------------------------------------
+
+        dato_input = self._page.locator(
+            "input#command\\.opfoelgningsdato"
+        ).first
+        dato_input.wait_for(state="visible", timeout=timeout)
+        dato_input.fill(opfoelgningsdato)
+
+        self._vaelg_sagsbehandler_fra_typeahead(
+            sagsbehandler=sagsbehandler,
+            timeout=timeout,
+        )
+
+        # ------------------------------------------------------
+        # Ekstra felter ved Brugerdefineret
+        # ------------------------------------------------------
+
+        if is_custom:
+            if not titel:
+                raise ValueError(
+                    "titel er påkrævet, når opfoelgningstype er "
+                    "Brugerdefineret."
+                )
+            if not frekvens:
+                raise ValueError(
+                    "frekvens er påkrævet, når opfoelgningstype er "
+                    "Brugerdefineret."
+                )
+
+            title_input = self._page.locator("input#title").first
+            title_input.wait_for(state="visible", timeout=timeout)
+            title_input.fill(titel)
+
+            self._select_option_by_value_or_label(
+                selector="select#frekvens",
+                option=frekvens,
+            )
+
+            if haendelsestype:
+                self._select_option_by_value_or_label(
+                    selector="select#haendelseType",
+                    option=haendelsestype,
+                )
+
+            if beskrivelse:
+                beskrivelse_input = self._page.locator(
+                    "textarea#beskrivelse"
+                ).first
+                beskrivelse_input.wait_for(
+                    state="visible",
+                    timeout=timeout,
+                )
+                beskrivelse_input.fill(beskrivelse)
+
+            # Genbrug den eksisterende journalnotatfunktion. Sektionen
+            # udvides ikke, hvis journalnotat ikke er angivet.
+            if journalnotat is not None:
+                self._opret_journalnotat(journalnotat)
+
+        elif any(
+            value is not None
+            for value in (
+                titel,
+                frekvens,
+                haendelsestype,
+                beskrivelse,
+                journalnotat,
+            )
+        ):
+            raise ValueError(
+                "titel, frekvens, haendelsestype, beskrivelse og "
+                "journalnotat må kun angives ved Brugerdefineret."
+            )
+
+        # ------------------------------------------------------
+        # Gem
+        # ------------------------------------------------------
+
+        gem = self._find_visible_submit_button(
+            text="Gem",
+            timeout=timeout,
+        )
+        gem.scroll_into_view_if_needed()
+        gem.click(timeout=30000)
+
+        self._wait_for_empty_opgave_loader_to_clear(timeout=timeout)
+
+        # Succes: formularen eller Gem-knappen forsvinder. Hvis KY viser en
+        # valideringsfejl, vil knappen typisk forblive synlig.
+        try:
+            gem.wait_for(state="hidden", timeout=30000)
+        except PlaywrightTimeoutError:
+            validation_text = self._visible_validation_text()
+            raise PlaywrightTimeoutError(
+                "Opfølgningsopgaven blev ikke gemt. "
+                f"Synlig validering: {validation_text or 'ukendt fejl'}"
+            )
+
+def _find_handlinger_menu_item_sync(
+        self,
+        text: str,
+        timeout: int,
+    ):
+        """Find et menupunkt kun inde i Handlinger-dropdownen."""
+
+        wanted = re.compile(
+            rf"^\\s*{re.escape(text)}\\s*$",
+            re.IGNORECASE,
+        )
+        elapsed = 0
+        poll_interval = 250
+
+        while elapsed < timeout:
+            container = self._page.locator(
+                "li#handlinger-dropdown"
+            ).first
+
+            if container.count() > 0:
+                candidates = container.locator(
+                    "a, button, [role='menuitem']",
+                    has_text=wanted,
+                )
+
+                for index in range(candidates.count()):
+                    candidate = candidates.nth(index)
+
+                    try:
+                        if not candidate.is_visible():
+                            continue
+                        if not candidate.is_enabled():
+                            continue
+
+                        visible_text = re.sub(
+                            r"\\s+",
+                            " ",
+                            candidate.inner_text(timeout=5000),
+                        ).strip()
+
+                        if wanted.fullmatch(visible_text):
+                            return candidate
+                    except PlaywrightTimeoutError:
+                        continue
+
+            self._page.wait_for_timeout(poll_interval)
+            elapsed += poll_interval
+
+        raise PlaywrightTimeoutError(
+            f"Menupunktet '{text}' blev ikke fundet inde i "
+            "Handlinger-dropdownen."
+        )
+
+def _wait_for_empty_opgave_loader_to_clear(
+        self,
+        timeout: int = 120000,
+    ) -> None:
+        """Vent på at #empty_opgave_loader er skjult eller fjernet."""
+
+        self._page.wait_for_function(
+            """
+            () => {
+                const loader = document.querySelector('#empty_opgave_loader');
+
+                if (!loader) {
+                    return true;
+                }
+
+                const style = window.getComputedStyle(loader);
+
+                return (
+                    style.display === 'none' ||
+                    style.visibility === 'hidden' ||
+                    style.opacity === '0' ||
+                    loader.offsetParent === null
+                );
+            }
+            """,
+            timeout=timeout,
+        )
+
+def _select_option_by_value_or_label(
+        self,
+        selector: str,
+        option: str,
+    ) -> None:
+        """Vælg en option via value, label eller normaliseret tekst."""
+
+        select = self._page.locator(selector).first
+        select.wait_for(state="attached", timeout=30000)
+
+        option = option.strip()
+        options = select.locator("option")
+        selected_value = None
+
+        for index in range(options.count()):
+            current = options.nth(index)
+            value = current.get_attribute("value") or ""
+            label = re.sub(
+                r"\\s+",
+                " ",
+                current.inner_text(timeout=5000),
+            ).strip()
+
+            if (
+                value.casefold() == option.casefold()
+                or label.casefold() == option.casefold()
+            ):
+                selected_value = value
+                break
+
+        if selected_value is None:
+            available = [
+                re.sub(
+                    r"\\s+",
+                    " ",
+                    options.nth(index).inner_text(timeout=5000),
+                ).strip()
+                for index in range(options.count())
+            ]
+            raise ValueError(
+                f"Kunne ikke finde '{option}' i {selector}. "
+                f"Muligheder: {available}"
+            )
+
+        select.select_option(value=selected_value)
+        select.dispatch_event("input")
+        select.dispatch_event("change")
+
+        # Understøt bootstrap-select, hvis KY har erstattet native select.
+        self._page.evaluate(
+            """
+            ({ selector, value }) => {
+                const element = document.querySelector(selector);
+                const jq = window.jQuery || window.$;
+
+                if (
+                    element &&
+                    jq &&
+                    typeof jq(element).selectpicker === 'function'
+                ) {
+                    jq(element).selectpicker('val', value);
+                    jq(element).trigger('changed.bs.select');
+                    jq(element).trigger('change');
+                }
+            }
+            """,
+            {
+                "selector": selector,
+                "value": selected_value,
+            },
+        )
+
+def _opfoelgningstype_er_brugerdefineret(
+        self,
+        selector: str,
+    ) -> bool:
+        """Kontrollér den faktisk valgte option i Opfølgningstype."""
+
+        selected = self._page.locator(
+            f"{selector} option:checked"
+        ).first
+        value = selected.get_attribute("value") or ""
+        label = selected.inner_text(timeout=5000).strip()
+
+        return (
+            value.casefold() == "manuel"
+            or label.casefold() == "brugerdefineret"
+        )
+
+def _vaelg_sagsbehandler_fra_typeahead(
+        self,
+        sagsbehandler: str,
+        timeout: int,
+    ) -> None:
+        """Skriv fuldt navn og klik den matchende typeahead-mulighed."""
+
+        typeahead = self._page.locator("input#typeahead").first
+        typeahead.wait_for(state="visible", timeout=timeout)
+        typeahead.fill(sagsbehandler)
+
+        wanted = re.compile(
+            rf"^\\s*{re.escape(sagsbehandler)}(?:\\s|\\().*$",
+            re.IGNORECASE,
+        )
+        elapsed = 0
+        poll_interval = 250
+
+        while elapsed < timeout:
+            suggestions = self._page.locator(
+                ".tt-menu:visible .tt-suggestion.tt-selectable"
+            )
+
+            for index in range(suggestions.count()):
+                suggestion = suggestions.nth(index)
+
+                try:
+                    if not suggestion.is_visible():
+                        continue
+
+                    suggestion_text = re.sub(
+                        r"\\s+",
+                        " ",
+                        suggestion.inner_text(timeout=5000),
+                    ).strip()
+
+                    if wanted.match(suggestion_text):
+                        suggestion.click(timeout=30000)
+                        return
+                except PlaywrightTimeoutError:
+                    continue
+
+            self._page.wait_for_timeout(poll_interval)
+            elapsed += poll_interval
+
+        raise PlaywrightTimeoutError(
+            "Kunne ikke finde sagsbehandleren i typeahead-listen: "
+            f"{sagsbehandler}"
+        )
+
+def _find_visible_submit_button(
+        self,
+        text: str,
+        timeout: int,
+    ):
+        """Find en synlig Gem-knap i den aktive opfølgningsformular."""
+
+        wanted = re.compile(
+            rf"^\\s*{re.escape(text)}\\s*$",
+            re.IGNORECASE,
+        )
+        elapsed = 0
+        poll_interval = 250
+
+        while elapsed < timeout:
+            candidates = self._page.locator(
+                "button[type='submit'], input[type='submit'], "
+                "button.btn-submit-form, a.btn-submit-form"
+            )
+
+            for index in range(candidates.count()):
+                candidate = candidates.nth(index)
+
+                try:
+                    if not candidate.is_visible():
+                        continue
+                    if not candidate.is_enabled():
+                        continue
+
+                    visible_text = (
+                        candidate.get_attribute("value")
+                        or candidate.inner_text(timeout=5000)
+                        or ""
+                    )
+                    visible_text = re.sub(
+                        r"\\s+",
+                        " ",
+                        visible_text,
+                    ).strip()
+
+                    if wanted.fullmatch(visible_text):
+                        return candidate
+                except PlaywrightTimeoutError:
+                    continue
+
+            self._page.wait_for_timeout(poll_interval)
+            elapsed += poll_interval
+
+        raise PlaywrightTimeoutError(
+            "Kunne ikke finde en synlig og aktiv Gem-knap i "
+            "opfølgningsformularen."
+        )
+
+def _visible_validation_text(self) -> str:
+        """Returnér synlige valideringsbeskeder fra formularen."""
+
+        messages = self._page.locator(
+            ".has-error:visible, .help-block:visible, "
+            ".alert-danger:visible, .field-validation-error:visible"
+        )
+        values = []
+
+        for index in range(messages.count()):
+            try:
+                text = re.sub(
+                    r"\\s+",
+                    " ",
+                    messages.nth(index).inner_text(timeout=3000),
+                ).strip()
+                if text and text not in values:
+                    values.append(text)
+            except PlaywrightTimeoutError:
+                continue
+
+        return " | ".join(values)
+
+async def naviger_til_borger_async(
+    page: AsyncPage,
+    cpr: str,
+    timeout: int = 120_000,
+) -> str:
+    """Fremsøg en borger på en eksisterende async KY-side.
+
+    Funktionen indsætter CPR i topsearch, venter på PERSON_OPLYSNINGER,
+    sammenligner CPR-værdien i tabellen med det fremsøgte CPR og returnerer
+    den aktuelle borger-URL som ``borger_url``.
+    """
+
+    cpr = _normaliser_cpr_async(cpr)
+
+    if not cpr.isdigit() or len(cpr) != 10:
+        raise ValueError("CPR skal bestå af præcis 10 cifre.")
+
+    if page.is_closed():
+        raise RuntimeError("KY-siden er lukket før borgeropslaget.")
+
+    search_input = page.locator(KYSelectors.Main.TOP_SEARCH).first
+    await search_input.wait_for(state="visible", timeout=timeout)
+    await search_input.scroll_into_view_if_needed()
+    await search_input.fill(cpr)
+
+    actual_cpr = _normaliser_cpr_async(await search_input.input_value())
+    if actual_cpr != cpr:
+        raise RuntimeError("CPR blev ikke indsat korrekt i topsearch.")
+
+    await search_input.press("Enter")
+
+    try:
+        table = await _vent_paa_personoplysninger_async(
+            page=page,
+            timeout_ms=15_000,
+        )
+    except AsyncPlaywrightTimeoutError:
+        # Første Enter kan kun vælge autocomplete-resultatet.
+        await search_input.press("Enter")
+        table = await _vent_paa_personoplysninger_async(
+            page=page,
+            timeout_ms=timeout,
+        )
+
+    cpr_fra_personoplysninger = await _hent_cpr_fra_personoplysninger_async(
+        table
+    )
+
+    if cpr_fra_personoplysninger != cpr:
+        raise RuntimeError(
+            "Den viste borger matcher ikke det fremsøgte CPR."
+        )
+
+    borger_url = page.url
+    if not borger_url:
+        raise RuntimeError("Borgerens URL kunne ikke læses efter opslaget.")
+
+    return borger_url
+
+
+async def _vent_paa_personoplysninger_async(
+    page: AsyncPage,
+    timeout_ms: int,
+):
+    """Vent på en synlig PERSON_OPLYSNINGER-tabel med læsbare rækker."""
+
+    elapsed_ms = 0
+    poll_interval_ms = 250
+
+    while elapsed_ms < timeout_ms:
+        if page.is_closed():
+            raise RuntimeError("KY-siden blev lukket under borgeropslaget.")
+
+        for frame in page.frames:
+            try:
+                tables = frame.locator(
+                    KYSelectors.Borgere.PERSON_OPLYSNINGER
+                )
+                for table_index in range(await tables.count()):
+                    table = tables.nth(table_index)
+                    if not await table.is_visible():
+                        continue
+
+                    rows = table.locator("tbody tr")
+                    for row_index in range(await rows.count()):
+                        row = rows.nth(row_index)
+                        if await row.is_visible() and (await row.inner_text()).strip():
+                            return table
+            except Exception:
+                continue
+
+        await page.wait_for_timeout(poll_interval_ms)
+        elapsed_ms += poll_interval_ms
+
+    raise AsyncPlaywrightTimeoutError(
+        "PERSON_OPLYSNINGER blev ikke synlig inden for "
+        f"{timeout_ms / 1000:.0f} sekunder. URL: {page.url}"
+    )
+
+
+async def _hent_cpr_fra_personoplysninger_async(table) -> str:
+    """Læs og normalisér CPR-værdien fra PERSON_OPLYSNINGER."""
+
+    value = await table.evaluate(
+        r"""
+        table => {
+            const normalize = value =>
+                (value || '').replace(/\s+/g, ' ').trim();
+            const labels = new Set([
+                'cpr', 'cpr-nummer', 'cpr nummer', 'personnummer'
+            ]);
+
+            for (const row of table.querySelectorAll('tbody tr')) {
+                const cells = Array.from(
+                    row.querySelectorAll('th, td:not(.handlinger)')
+                ).map(cell => normalize(cell.innerText));
+
+                for (let index = 0; index < cells.length - 1; index += 1) {
+                    const label = cells[index]
+                        .replace(/:$/, '')
+                        .trim()
+                        .toLocaleLowerCase('da-DK');
+                    if (labels.has(label) && cells[index + 1]) {
+                        return cells[index + 1];
+                    }
+                }
+            }
+            return null;
+        }
+        """
+    )
+
+    cpr = _normaliser_cpr_async(str(value or ""))
+    if not cpr.isdigit() or len(cpr) != 10:
+        raise RuntimeError(
+            "CPR-rækken kunne ikke læses korrekt fra PERSON_OPLYSNINGER."
+        )
+    return cpr
+
+
+def _normaliser_cpr_async(value: str) -> str:
+    """Fjern alle tegn, der ikke er cifre."""
+
+    return re.sub(r"\D", "", value)
+

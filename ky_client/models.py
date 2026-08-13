@@ -97,3 +97,14 @@ class RedigerOpgave:
         "Halvårligt",
         "Årligt",
     ] = "Aldrig"
+
+
+@dataclass
+class Opfoelgningsopgave:
+    opfoelgningstype: str
+    opfoelgningsdato: str
+    sagsbehandler: str
+    titel: str = ""
+    frekvens: str = ""
+    haendelsestype: str = ""
+    beskrivelse: str = ""

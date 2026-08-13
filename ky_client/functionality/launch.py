@@ -7,7 +7,6 @@ Fælleskommunale IDP-funktion.
 
 from __future__ import annotations
 
-import os
 import re
 from typing import Any
 
@@ -22,16 +21,15 @@ from q_haderslev_vbo.playwright.faelles_kommunal_login_idp import (
     login_via_faelles_kommunal_idp,
 )
 
+from ky_client.selectors import KYSelectors
 
-KY_URL = os.getenv(
-    "KY_URL",
-    "https://fs0510.fs.kommunernesydelsessystem.dk/ky-fagsystem",
-).strip()
 
-KY_MUNICIPALITY = os.getenv(
-    "KY_MUNICIPALITY",
-    "Haderslev Kommune",
-).strip()
+KY_URL = (
+    "https://fs0510.fs.kommunernesydelsessystem.dk"
+    "/ky-fagsystem"
+)
+
+KY_MUNICIPALITY = "Haderslev Kommune"
 
 KY_DOMAIN = "kommunernesydelsessystem.dk"
 KY_PATH = "/ky-fagsystem"
@@ -50,35 +48,12 @@ OK_BUTTON = (
     "button:has-text('Vælg')"
 )
 
-NAVIGATION_TIMEOUT_MS = int(
-    os.getenv("KY_NAVIGATION_TIMEOUT_MS", "120000")
-)
-ACTION_TIMEOUT_MS = int(
-    os.getenv("KY_ACTION_TIMEOUT_MS", "30000")
-)
-LOGIN_TIMEOUT_MS = int(
-    os.getenv("KY_LOGIN_TIMEOUT_MS", "120000")
-)
-POLL_INTERVAL_MS = int(
-    os.getenv("KY_POLL_INTERVAL_MS", "500")
-)
-
-WAIT_AFTER_GOTO_MS = int(
-    os.getenv("KY_WAIT_AFTER_GOTO_MS", "1500")
-)
-WAIT_AFTER_MUNICIPALITY_MS = int(
-    os.getenv("KY_WAIT_AFTER_MUNICIPALITY_MS", "1000")
-)
-WAIT_AFTER_CONTINUE_MS = int(
-    os.getenv("KY_WAIT_AFTER_CONTINUE_MS", "2000")
-)
-WAIT_BEFORE_IDP_LOGIN_MS = int(
-    os.getenv("KY_WAIT_BEFORE_IDP_LOGIN_MS", "1500")
-)
-WAIT_AFTER_IDP_LOGIN_MS = int(
-    os.getenv("KY_WAIT_AFTER_IDP_LOGIN_MS", "3000")
-)
-
+# Faste standardtider i millisekunder.
+# Værdierne kan ikke længere overskrives via .env.
+NAVIGATION_TIMEOUT_MS = 120_000
+ACTION_TIMEOUT_MS = 30_000
+LOGIN_TIMEOUT_MS = 120_000
+POLL_INTERVAL_MS = 500
 
 class KyLaunchError(RuntimeError):
     """Fejl under launch eller login i KY."""
@@ -113,25 +88,6 @@ async def optional_screenshot(
         )
 
 
-async def wait_between_steps(
-    page: Page,
-    delay_ms: int,
-    stage: str,
-) -> None:
-    """Vent kontrolleret og kontrollér, at siden stadig er åben."""
-
-    if page.is_closed():
-        raise KyLaunchError(
-            f"Siden blev lukket før trinnet '{stage}'."
-        )
-
-    if delay_ms > 0:
-        await page.wait_for_timeout(delay_ms)
-
-    if page.is_closed():
-        raise KyLaunchError(
-            f"Siden blev lukket under trinnet '{stage}'."
-        )
 
 
 async def wait_for_page_ready(
@@ -279,51 +235,44 @@ async def wait_for_ky_ready(
 
 
 async def select_municipality_and_continue(page: Page) -> None:
-    """Vælg kommunen, hvis kommunevælgeren vises."""
-
-    dropdown = page.locator(AUTH_DROPDOWN)
+    """Vælg kommunen og vent på, at kommunevælgeren forsvinder."""
 
     try:
-        await dropdown.wait_for(
+        await page.wait_for_selector(
+            AUTH_DROPDOWN,
             state="visible",
             timeout=ACTION_TIMEOUT_MS,
         )
     except PlaywrightTimeoutError:
-        # Kommunevælgeren vises ikke nødvendigvis ved en eksisterende session.
+        # Kommunevælgeren vises ikke ved en allerede aktiv session.
         return
 
-    try:
-        await dropdown.select_option(
-            label=KY_MUNICIPALITY,
-        )
-    except PlaywrightError as error:
-        raise KyLaunchError(
-            f"Kommunen '{KY_MUNICIPALITY}' kunne ikke vælges."
-        ) from error
-
-    await wait_between_steps(
-        page,
-        WAIT_AFTER_MUNICIPALITY_MS,
-        "efter valg af kommune",
+    await page.select_option(
+        AUTH_DROPDOWN,
+        label=KY_MUNICIPALITY,
     )
 
     selected_button = await _find_visible_enabled_button(
         page=page,
         timeout_ms=ACTION_TIMEOUT_MS,
     )
-
     await selected_button.click(timeout=ACTION_TIMEOUT_MS)
 
-    await wait_between_steps(
-        page,
-        WAIT_AFTER_CONTINUE_MS,
-        "efter klik på OK/Vælg",
-    )
+    # Vent på et konkret DOM-skift i stedet for en fast pause.
+    try:
+        await page.wait_for_selector(
+            AUTH_DROPDOWN,
+            state="hidden",
+            timeout=NAVIGATION_TIMEOUT_MS,
+        )
+    except PlaywrightTimeoutError as error:
+        raise KyLaunchError(
+            "Kommunevælgeren forsvandt ikke efter klik på OK/Vælg. "
+            f"Aktuel URL: {page.url}"
+        ) from error
 
-    await raise_if_ky_error(
-        page,
-        "valg af kommune",
-    )
+    await wait_for_page_ready(page)
+    await raise_if_ky_error(page, "valg af kommune")
 
 
 async def launch_ky(
@@ -364,12 +313,6 @@ async def launch_ky(
             timeout=NAVIGATION_TIMEOUT_MS,
         )
 
-        await wait_between_steps(
-            page,
-            WAIT_AFTER_GOTO_MS,
-            "efter åbning af KY",
-        )
-
         await wait_for_page_ready(page)
         await raise_if_ky_error(page, "åbning af KY")
 
@@ -393,12 +336,6 @@ async def launch_ky(
         if await is_logged_in(page):
             return
 
-        await wait_between_steps(
-            page,
-            WAIT_BEFORE_IDP_LOGIN_MS,
-            "før IDP-login",
-        )
-
         await optional_screenshot(
             session=session,
             page=page,
@@ -411,10 +348,13 @@ async def launch_ky(
             credential_name=credential_name,
         )
 
-        await wait_between_steps(
-            page,
-            WAIT_AFTER_IDP_LOGIN_MS,
-            "efter IDP-login",
+        await wait_for_ky_ready(page)
+
+        # Bekræft et konkret element fra den færdigindlæste KY-side.
+        await page.wait_for_selector(
+            KYSelectors.Main.LOGO,
+            state="visible",
+            timeout=LOGIN_TIMEOUT_MS,
         )
 
         await optional_screenshot(
@@ -422,8 +362,6 @@ async def launch_ky(
             page=page,
             name="04_efter_idp_login",
         )
-
-        await wait_for_ky_ready(page)
 
         await optional_screenshot(
             session=session,

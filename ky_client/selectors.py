@@ -26,6 +26,29 @@ class KYSelectors:
         LIVSSITUATION = "table#person-overblik-livssituation"
         LÅST_BANNER = 'div[data-textkey="system.type.advarsel_item.reserveret_af"]'
 
+        HANDLINGER_CONTAINER = "li#handlinger-dropdown"
+        OPFOELGNING_LOADER = "div#empty_opgave_loader"
+        OPFOELGNINGSTYPE = "select#opfoelgningsType"
+        OPFOELGNINGSDATO = "input#command\\.opfoelgningsdato"
+        OPFOELGNING_SAGSBEHANDLER = "input#typeahead"
+        OPFOELGNING_TITEL = "input#title"
+        OPFOELGNING_FREKVENS = "select#frekvens"
+        OPFOELGNING_HAENDELSESTYPE = "select#haendelseType"
+        OPFOELGNING_BESKRIVELSE = "textarea#beskrivelse"
+        OPFOELGNING_GEM = (
+            "button[type='submit']:has-text('Gem'), "
+            "input[type='submit'][value='Gem'], "
+            "button.btn-submit-form:has-text('Gem'), "
+            "a.btn-submit-form:has-text('Gem')"
+        )
+        OPFOELGNING_VALIDERING = (
+            ".has-error:visible, .help-block:visible, "
+            ".alert-danger:visible, .field-validation-error:visible"
+        )
+
+
+
+
         #Dokumenter på den åbnede opgave
         DOKUMENTER_TOGGLE = (
             "a[data-toggle='collapse']"
