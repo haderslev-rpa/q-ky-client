@@ -13,10 +13,17 @@ class KYSelectors:
     class Main:
         LOGO = "img#fagsystem-logo"
         TOP_SEARCH = "input#topSearch"
+        TOP_SEARCH_BUTTON = "div#topSearchBtn"
 
     class Opgaveindbakke:
         VÆLG_OPGAVEPAKKE = "button[data-id='arbejdspakker']"
         UBEHANDLEDE_OPGAVER = "table#ubehandledeTable"
+
+        PACKAGE_CONTROL_SELECTORS = (
+            "button[data-id='arbejdspakker']",
+            "select#arbejdspakker",
+            "select[name='arbejdspakker']",
+        )
 
     class Borgere:
         # Overblik
@@ -25,6 +32,115 @@ class KYSelectors:
         UBEHANDLEDE_OPGAVER = "table#ubehandlede-opgaver"
         LIVSSITUATION = "table#person-overblik-livssituation"
         LÅST_BANNER = 'div[data-textkey="system.type.advarsel_item.reserveret_af"]'
+
+
+        # Send brev - opgaveheader og loader
+        SEND_BREV_HEADER = (
+            "div#opgave-header.block-heading "
+            "span[data-textkey='system.type.opgave.send_brev']"
+        )
+        SEND_BREV_HEADER_CONTAINER = "div#opgave-header.block-heading"
+        SEND_BREV_UNDOCK_BUTTON = (
+            "a.undock_panel_button[data-opgave-id][data-url]"
+        )
+        SEND_BREV_LOADER = (
+            "div#empty_opgave_loader, "
+            "div#opgave_loader, "
+            "div#opgave-loader, "
+            "i#opgave-spinner"
+        )
+
+        # Send brev - Vælg sag
+        SEND_BREV_SAGSVAELGER = (
+            "div.sagsvaelger.dropdown"
+            "[data-id='command.alleTilfoejedeBreve[0].sagIds']"
+        )
+        SEND_BREV_SAGSVAELGER_TOGGLE = (
+            "div.dropdown-toggle[data-toggle='dropdown']"
+        )
+        SEND_BREV_SAGSVAELGER_INPUT = (
+            "input.sagsvaelger-input[readonly]"
+        )
+        SEND_BREV_SAGSVAELGER_MENU = (
+            "div.sagsvaelger-list.dropdown-menu"
+        )
+        SEND_BREV_SAGSVAELGER_SOEG = "input.sagsvaelger-soeg"
+        SEND_BREV_SAGSVAELGER_AKTIVE = (
+            "input[type='checkbox'][data-tilstand='aktiv']"
+        )
+        SEND_BREV_SAGSVAELGER_PASSIVE = (
+            "input[type='checkbox'][data-tilstand='passiv']"
+        )
+        SEND_BREV_SAGSVAELGER_RESULTS = "div.sagsvaelger-results"
+        SEND_BREV_SAGSVAELGER_SELECT_CELL = "td.select-row"
+
+        SEND_BREV_SAGSVAELGER_TABEL = (
+            "table[id^='brevSagsvaelgerTable']"
+        )
+
+        SEND_BREV_SAGSVAELGER_RAEKKER = (
+            "table[id^='brevSagsvaelgerTable'] "
+            "> tbody > tr.table-row"
+        )
+
+        # Send brev - Brevskabelon
+        SEND_BREV_BREVSKABELON_INPUT = (
+            "input.skabelon_titel"
+            "[name='alleTilfoejedeBreve[0].skabelonTitel']"
+            "[readonly]"
+        )
+        SEND_BREV_BREVSKABELON_SOEG = (
+            "input[placeholder='Søg efter skabelon']"
+        )
+        SEND_BREV_BREVSKABELON_TITLER = (
+            "ul.skabelonlist li[data-titel], "
+            "ul.skabelonlist li:not(:has(ul)), "
+            "[role='treeitem']:not([aria-expanded]), "
+            "[role='option'], "
+            ".skabelonvaelger li:not(:has(ul))"
+        )
+
+
+        # Send brev - Standard bilag
+        # VIGTIGT: Selectoren må kun matche readonly-inputs til en
+        # skabelonvælger. Generiske button/data-toggle selectors kan ramme
+        # Vælg sag-dropdownen og åbne den igen efter valg af brevskabelon.
+        SEND_BREV_STANDARD_BILAG_CONTROL = (
+            "input.skabelon_titel[readonly]:visible, "
+            "input[readonly][data-titel]:visible, "
+            "input[readonly][placeholder*='bilag' i]:visible"
+        )
+        SEND_BREV_STANDARD_BILAG_MENU = (
+            "ul.skabelonlist:visible:has("
+            "li.hg-skabelon.cell.VEDHAEFTNING[data-titel][data-noegle]"
+            ")"
+        )
+        SEND_BREV_STANDARD_BILAG_TITLER = (
+            "li.hg-skabelon.cell.VEDHAEFTNING[data-titel][data-noegle]"
+        )
+
+
+
+        # Send brev - fysisk post, bilagsdropdown og Brevtype
+        SEND_BREV_FYSISK_POST = (
+            "input[type='checkbox'].fysisk_post"
+            "[name='alleTilfoejedeBreve[0].fysiskPost']"
+        )
+        SEND_BREV_FYSISK_POST_JS = "input[type='checkbox'].fysisk_post"
+        SEND_BREV_FYSISK_POST_NAME = "alleTilfoejedeBreve[0].fysiskPost"
+        SEND_BREV_POSTAGE_CONTAINER = (
+            "tr#postage-container0[name='postage-container']"
+        )
+        SEND_BREV_POSTAGE_TYPE = (
+            "select[name='alleTilfoejedeBreve[0].postage']"
+        )
+        SEND_BREV_STANDARD_BILAG_DROPDOWN = (
+            "div.skabelon-vaelger.dropdown-menu"
+        )
+        SEND_BREV_STANDARD_BILAG_SOEG = (
+            "input.skabelonvaelger-soeg"
+            "[placeholder='Søg efter vedhæftning']"
+        )
 
         HANDLINGER_CONTAINER = "li#handlinger-dropdown"
         OPFOELGNING_LOADER = "div#empty_opgave_loader"
@@ -46,10 +162,35 @@ class KYSelectors:
             ".alert-danger:visible, .field-validation-error:visible"
         )
 
+        # Alle åbne borgerfaner.
+        # "active" anvendes ikke, fordi alle PERSON-faner skal findes.
+        BORGER_FANER = (
+            "li.tab.topmenu-tab"
+            "[data-tab-target-id='PERSON']"
+        )
+
+        # Lukkeknapperne i alle åbne borgerfaner.
+        LUK_BORGER_FANER = (
+            "li.tab.topmenu-tab"
+            "[data-tab-target-id='PERSON'] "
+            "i.navigation-close-tab"
+            "[data-entity-type='PERSON']"
+        )
+
+        PERSON_FANER = (
+            "li.tab.topmenu-tab"
+            "[data-tab-target-id='PERSON']"
+        )
+
+        PERSON_LUKKNAPPER = (
+            "li.tab.topmenu-tab"
+            "[data-tab-target-id='PERSON'] "
+            ".navigation-close-tab"
+            "[data-entity-type='PERSON']"
+        )        
 
 
-
-        #Dokumenter på den åbnede opgave
+        # Dokumenter på den åbnede opgave
         DOKUMENTER_TOGGLE = (
             "a[data-toggle='collapse']"
             ":has(span.panel-title:has-text('Dokumenter'))"
@@ -61,22 +202,25 @@ class KYSelectors:
             "[href*='aabnPdfDokument']"
         )
 
-        # Navigation
-        OVERBLIK = _nav("person_overblik")
-        JOURNALNOTATER_DOKUMENTER = _nav("person_journalnotater_dokumenter")
-        HAENDELSER = _nav("person_haendelser")
-        UDBETALING = _nav("person_udbetalinger")
-        KONTERINGER = _nav("person_konteringer")
-        INDTAEGTER = _nav("person_indtaegter")
-        SANKTIONER = _nav("person_sanktioner")
-        FERIE = _nav("person_ferie")
-        FORDRINGER = _nav("person_fordringer")
-        MODREGNINGER = _nav("person_modregningsanmodninger")
-        FUB = _nav("person_fub")
-        SKAT = _nav("skatteindberetninger")
-        JOBCENTER = _nav("person_jobcenter")
-        MEDICINTILSKUD = _nav("person_medicintilskud")
+        # Navigation async
+        OVERBLIK = "li.tab[data-tab-target-id='PERSON_OVERBLIK']"
+        JOURNALNOTATER_DOKUMENTER = (
+            "li.tab[data-tab-target-id='PERSON_JOURNALNOTATER_DOKUMENTER']"
+        )
+        HAENDELSER = "li.tab[data-tab-target-id='PERSON_HAENDELSER']"
+        UDBETALINGER = "li.tab[data-tab-target-id='PERSON_UDBETALINGER']"
+        KONTERINGER = "li.tab[data-tab-target-id='PERSON_KONTERINGER']"
+        INDTAEGTER = "li.tab[data-tab-target-id='PERSON_INDTÆGTER']"
+        SANKTIONER = "li.tab[data-tab-target-id='PERSON_SANKTIONER']"
+        FERIE = "li.tab[data-tab-target-id='PERSON_FERIE']"
+        FORDRINGER = "li.tab[data-tab-target-id='PERSON_FORDRINGER']"
+        MODREGNINGER = "li.tab[data-tab-target-id='PERSON_MODREGNINGSANMODNINGER']"
+        FUB = "li.tab[data-tab-target-id='PERSON_FUB']"
+        SKAT = "li.tab[data-tab-target-id='SKATTEINDBERETNINGER']"
+        JOBCENTER = "li.tab[data-tab-target-id='PERSON_JOBCENTER']"
+        MEDICINTILSKUD = "li.tab[data-tab-target-id='PERSON_MEDICINTILSKUD']"
 
+        
         # Ferie
         FERIEPERIODER_TIL_BEREGNING = "table#ferieperioder-table"
         FRAVÆR_FRA_JOBCENTER = "table#fravaer-table"
@@ -205,10 +349,3 @@ class KYSelectors:
 
         # Luk alle opgaver
         LUK_ALLE_OPGAVER_FORM = "form#lukAlleOpgForm"
-
-PACKAGE_CONTROL_SELECTORS = (
-    "button[data-id='arbejdspakker']",
-    "select#arbejdspakker",
-    "select[name='arbejdspakker']",
-    # øvrige selectors...
-)

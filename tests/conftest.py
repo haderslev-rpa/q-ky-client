@@ -1,31 +1,41 @@
-"""Faelles pytest-fixtures til KY-klientens integrationstests.
+"""Fælles pytest-fixtures til KY-klientens integrationstests.
 
-Credentials hentes ikke fra .env eller miljoevariabler.
+Credentials hentes ikke fra ``.env``. Testene sender kun navnet på
+credential-posten til ``launch_ky()``. ``BrowserSession`` og login-flowet
+foretager derefter credential-opslaget i Automation Server.
 
-Testene sender kun navnet paa credential-posten til ``launch_ky()``.
-``login_via_faelles_kommunal_idp()`` og ``BrowserSession`` foretager derefter
-selve credential-opslaget i Automation Server.
+Test-CPR hentes som standard fra projektets ``.env``::
 
-Standard credential-post:
-    DIRXFLX
+    TEST_CPR=0101011234
 
-Credential-navnet kan overskrives ved koersel:
-    pytest -s -vv --ky-credential-name DIRXFLX
+Værdien kan overskrives ved kørsel::
 
-Et test-CPR kan angives uden miljoevariabler:
     pytest -s -vv --test-cpr 0101011234
+
+Standard credential-post er ``DIRXFLX`` og kan overskrives med::
+
+    pytest -s -vv --ky-credential-name DIRXFLX
 """
 
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
-
+from dotenv import load_dotenv
+from playwright.async_api import Page
 from q_haderslev_vbo.playwright.browser_session import BrowserSession
 
-
 DEFAULT_KY_CREDENTIAL_NAME = "DIRXFLX"
+PROJECT_ROOT = Path(__file__).resolve().parent
+ENV_FILE = PROJECT_ROOT / ".env"
+
+# Indlæs .env én gang, når conftest.py importeres. Eksisterende miljøvariabler
+# overskrives ikke; CLI-parameteren får stadig førsteprioritet i test_cpr.
+load_dotenv(ENV_FILE, override=False)
 
 
 # ---------------------------------------------------------------------------
@@ -34,60 +44,54 @@ DEFAULT_KY_CREDENTIAL_NAME = "DIRXFLX"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    """Tilfoej KY-parametre til pytest uden anvendelse af .env."""
+    """Tilføj fælles KY-parametre til pytest."""
 
     group = parser.getgroup(
         "ky",
         "Indstillinger til KY-integrationstests",
     )
-
     group.addoption(
         "--ky-credential-name",
         action="store",
         default=DEFAULT_KY_CREDENTIAL_NAME,
         help=(
-            "Navnet paa credential-posten i Automation Server. "
+            "Navnet på credential-posten i Automation Server. "
             f"Standard: {DEFAULT_KY_CREDENTIAL_NAME}"
         ),
     )
-
     group.addoption(
         "--test-cpr",
         action="store",
         default=None,
         help=(
-            "Valgfrit CPR-nummer til tests, som kraever et borgeropslag. "
-            "CPR skal bestaa af praecis 10 cifre."
+            "CPR til integrationstests. Overskriver TEST_CPR fra .env. "
+            "CPR skal bestå af præcis 10 cifre."
         ),
     )
-
     group.addoption(
         "--ky-headless",
         action="store_true",
         default=False,
         help="Start browseren headless.",
     )
-
     group.addoption(
         "--ky-debug",
         dest="ky_debug",
         action="store_true",
         default=True,
-        help="Aktiver BrowserSession-debug (standard).",
+        help="Aktivér BrowserSession-debug (standard).",
     )
-
     group.addoption(
         "--no-ky-debug",
         dest="ky_debug",
         action="store_false",
-        help="Deaktiver BrowserSession-debug.",
+        help="Deaktivér BrowserSession-debug.",
     )
-
     group.addoption(
         "--ky-video",
         action="store_true",
         default=False,
-        help="Aktiver videooptagelse i BrowserSession.",
+        help="Aktivér videooptagelse i BrowserSession.",
     )
 
 
@@ -98,7 +102,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 @pytest.fixture(scope="session")
 def anyio_backend() -> str:
-    """Koer asynkrone tests med asyncio."""
+    """Kør asynkrone tests med asyncio."""
 
     return "asyncio"
 
@@ -112,23 +116,16 @@ def anyio_backend() -> str:
 def ky_credential_name(
     pytestconfig: pytest.Config,
 ) -> str:
-    """Returner navnet paa credential-posten i Automation Server.
-
-    Fixturen returnerer kun postens navn. Brugernavn, adgangskode, API-noegle,
-    customer-id og IDP-guid hentes ikke her og ligger ikke i .env.
-    """
+    """Returnér navnet på credential-posten i Automation Server."""
 
     value = str(
-        pytestconfig.getoption("--ky-credential-name")
-        or ""
+        pytestconfig.getoption("--ky-credential-name") or ""
     ).strip()
-
     if not value:
         pytest.fail(
-            "--ky-credential-name maa ikke vaere tom.",
+            "--ky-credential-name må ikke være tom.",
             pytrace=False,
         )
-
     return value
 
 
@@ -136,17 +133,13 @@ def ky_credential_name(
 def ky_user(
     ky_credential_name: str,
 ) -> str:
-    """Bagudkompatibelt alias til eksisterende tests.
-
-    ``ky_user`` er nu navnet paa credential-posten i Automation Server.
-    Fixturen indeholder ikke et faktisk brugernavn.
-    """
+    """Bagudkompatibelt alias til eksisterende tests."""
 
     return ky_credential_name
 
 
 # ---------------------------------------------------------------------------
-# Valgfrit test-CPR
+# Test-CPR fra CLI eller .env
 # ---------------------------------------------------------------------------
 
 
@@ -154,25 +147,35 @@ def ky_user(
 def test_cpr(
     pytestconfig: pytest.Config,
 ) -> str:
-    """Returner og valider ``--test-cpr`` for tests med borgeropslag."""
+    """Returnér og validér test-CPR fra CLI eller ``TEST_CPR`` i .env.
 
-    raw_value = pytestconfig.getoption("--test-cpr")
+    Prioritet:
+    1. ``--test-cpr``
+    2. miljøvariablen ``TEST_CPR`` indlæst fra projektets .env
+    """
 
-    if raw_value is None:
+    cli_value = pytestconfig.getoption("--test-cpr")
+    env_value = os.getenv("TEST_CPR")
+    raw_value = cli_value if cli_value is not None else env_value
+
+    if raw_value is None or not str(raw_value).strip():
         pytest.fail(
-            "Testen kraever et CPR-nummer. "
-            "Angiv det med --test-cpr 0101011234.",
+            "Testen kræver et CPR-nummer. "
+            f"Angiv TEST_CPR i {ENV_FILE} eller brug "
+            "--test-cpr 0101011234.",
             pytrace=False,
         )
 
-    cpr = str(raw_value).replace("-", "").replace(" ", "").strip()
-
-    if not cpr.isdigit() or len(cpr) != 10:
+    cpr = re.sub(r"\D", "", str(raw_value))
+    if len(cpr) != 10:
+        source = "--test-cpr" if cli_value is not None else "TEST_CPR i .env"
         pytest.fail(
-            "--test-cpr skal bestaa af praecis 10 cifre.",
+            f"{source} skal bestå af præcis 10 cifre.",
             pytrace=False,
         )
 
+    source = "CLI" if cli_value is not None else ".env"
+    print(f"Test-CPR hentet fra {source}: ******{cpr[-4:]}")
     return cpr
 
 
@@ -183,21 +186,21 @@ def test_cpr(
 
 @pytest.fixture(scope="session")
 def ky_headless(pytestconfig: pytest.Config) -> bool:
-    """Returner den valgte headless-indstilling."""
+    """Returnér den valgte headless-indstilling."""
 
     return bool(pytestconfig.getoption("--ky-headless"))
 
 
 @pytest.fixture(scope="session")
 def ky_debug(pytestconfig: pytest.Config) -> bool:
-    """Returner den valgte debug-indstilling."""
+    """Returnér den valgte debug-indstilling."""
 
     return bool(pytestconfig.getoption("ky_debug"))
 
 
 @pytest.fixture(scope="session")
 def ky_video(pytestconfig: pytest.Config) -> bool:
-    """Returner den valgte videoindstilling."""
+    """Returnér den valgte videoindstilling."""
 
     return bool(pytestconfig.getoption("--ky-video"))
 
@@ -208,28 +211,14 @@ async def automation_session(
     ky_debug: bool,
     ky_video: bool,
 ) -> AsyncIterator[BrowserSession]:
-    """Opret og ryd op i en rigtig BrowserSession.
-
-    BrowserSession bruges direkte af ``launch_ky()``. Credentials til IDP-login
-    hentes af Automation Server-flowet ud fra ``credential_name``; fixturen
-    opretter derfor ingen lokal credential-dictionary.
-
-    Fixturen starter sessionen, men opretter ikke automatisk en Page. Testen kan
-    oprette en side med::
-
-        page = await automation_session.new_page()
-
-    Sessionen lukkes automatisk efter testen.
-    """
+    """Opret og ryd op i en rigtig BrowserSession."""
 
     session = BrowserSession(
         headless=ky_headless,
         debug=ky_debug,
         video=ky_video,
     )
-
     await session.start()
-
     try:
         yield session
     finally:
@@ -239,15 +228,10 @@ async def automation_session(
 @pytest.fixture
 async def ky_page(
     automation_session: BrowserSession,
-) -> AsyncIterator[object]:
-    """Opret en Page i den aktive BrowserSession.
-
-    Fixturen logger ikke ind i KY. Brug ``launch_ky()`` i testen med
-    ``ky_credential_name`` eller ``ky_user``.
-    """
+) -> AsyncIterator[Page]:
+    """Opret en Playwright Page i den aktive BrowserSession."""
 
     page = await automation_session.new_page()
-
     recorder = getattr(
         automation_session,
         "recorder",
@@ -258,7 +242,6 @@ async def ky_page(
         "set_page",
         None,
     )
-
     if callable(set_page):
         set_page(page)
 
