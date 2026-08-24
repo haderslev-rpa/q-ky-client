@@ -1731,7 +1731,7 @@ async def opret_opfoelgningsopgave(
     haendelsestype: str | None = None,
     beskrivelse: str | None = None,
     vaelg_sagsbehandler_fra_typeahead: bool = False,
-    debug: bool = False,
+    test: bool = False,
     timeout: int = OPGAVE_TIMEOUT_MS,
 ) -> OpgaveCheckpoint:
     """Åbn, udfyld og gem en opfølgningsopgave på den aktive borger.
@@ -1764,7 +1764,7 @@ async def opret_opfoelgningsopgave(
         vaelg_sagsbehandler_fra_typeahead:
             Hvis True, vælges et matchende typeahead-resultat. Hvis False,
             indsættes teksten uden valg af et forslag.
-        debug:
+        test:
             Hvis True, udfyldes og valideres alle felter, men der klikkes
             ikke på Gem. Funktionen returnerer stadig opgavecheckpointet,
             så den udfyldte formular kan inspiceres i browseren.
@@ -1816,7 +1816,7 @@ async def opret_opfoelgningsopgave(
     print(f"Frekvens: {frekvens!r}")
     print(f"Hændelsestype: {haendelsestype!r}")
     print(f"Beskrivelse: {beskrivelse!r}")
-    print(f"Debug: {debug}")
+    print(f"test: {test}")
     print("=" * 70)
 
     checkpoint = await aabn_opgave_og_hent_url(
@@ -1935,10 +1935,10 @@ async def opret_opfoelgningsopgave(
             "angives, når opfølgningstypen er Brugerdefineret."
         )
 
-    if debug:
+    if test:
         print()
         print("=" * 70)
-        print("DEBUG-TILSTAND: FORMULAREN ER UDFYLDT")
+        print("test-TILSTAND: FORMULAREN ER UDFYLDT")
         print("Der klikkes ikke på Gem.")
         print(f"Opgavenavn: {checkpoint['opgave_navn']}")
         print(f"Opgave-id: {checkpoint['opgave_id']}")
