@@ -160,9 +160,7 @@ class OpgaveindbakkeClient:
         if await links.count() > 0:
             await links.first.click(timeout=ACTION_TIMEOUT_MS)
         else:
-            buttons = row.locator(
-                "button:visible, input[type='button']:visible"
-            )
+            buttons = row.locator("button:visible, input[type='button']:visible")
             if await buttons.count() > 0:
                 await buttons.first.click(timeout=ACTION_TIMEOUT_MS)
             else:
@@ -225,9 +223,7 @@ class OpgaveindbakkeClient:
             await self._page.wait_for_timeout(100)
             elapsed_ms += 100
 
-        raise OpgaveindbakkeError(
-            "Dropdown-menuen blev ikke synlig efter klik."
-        )
+        raise OpgaveindbakkeError("Dropdown-menuen blev ikke synlig efter klik.")
 
     async def _select_package(
         self,
@@ -239,11 +235,7 @@ class OpgaveindbakkeClient:
         pattern = self._package_pattern(package_name)
         frames = [
             preferred_frame,
-            *[
-                frame
-                for frame in self._page.frames
-                if frame != preferred_frame
-            ],
+            *[frame for frame in self._page.frames if frame != preferred_frame],
         ]
 
         elapsed_ms = 0
@@ -272,9 +264,7 @@ class OpgaveindbakkeClient:
             await self._page.wait_for_timeout(POLL_INTERVAL_MS)
             elapsed_ms += POLL_INTERVAL_MS
 
-        raise OpgaveindbakkeError(
-            f"Opgavepakken blev ikke fundet: {package_name}"
-        )
+        raise OpgaveindbakkeError(f"Opgavepakken blev ikke fundet: {package_name}")
 
     async def _get_current_table_state(self) -> str | None:
         """Hent en signatur for tabellen før dropdown-valget."""
@@ -333,10 +323,7 @@ class OpgaveindbakkeClient:
                 try:
                     processing = frame.locator(PROCESSING_INDICATOR).first
 
-                    if (
-                        await processing.count() > 0
-                        and await processing.is_visible()
-                    ):
+                    if await processing.count() > 0 and await processing.is_visible():
                         saw_processing = True
                         continue
 
@@ -349,9 +336,10 @@ class OpgaveindbakkeClient:
                         or await dropdown.inner_text()
                     )
 
-                    if package_name.casefold() not in self._normalise(
-                        dropdown_text
-                    ).casefold():
+                    if (
+                        package_name.casefold()
+                        not in self._normalise(dropdown_text).casefold()
+                    ):
                         continue
 
                     table = frame.locator(RESULTS_TABLE).first
@@ -363,16 +351,9 @@ class OpgaveindbakkeClient:
                         continue
 
                     new_state = await self._get_table_state(table)
-                    changed = (
-                        old_table_state is None
-                        or new_state != old_table_state
-                    )
+                    changed = old_table_state is None or new_state != old_table_state
 
-                    if (
-                        changed
-                        or saw_processing
-                        or elapsed_ms >= unchanged_grace_ms
-                    ):
+                    if changed or saw_processing or elapsed_ms >= unchanged_grace_ms:
                         return frame, table
                 except Exception:
                     continue
@@ -381,8 +362,7 @@ class OpgaveindbakkeClient:
             elapsed_ms += POLL_INTERVAL_MS
 
         raise OpgaveindbakkeError(
-            "Den nye opgavetabel blev ikke indlæst. "
-            f"Aktuel URL: {self._page.url}"
+            f"Den nye opgavetabel blev ikke indlæst. Aktuel URL: {self._page.url}"
         )
 
     async def _wait_for_table_stable(self, frame: Frame) -> Locator:
@@ -396,10 +376,7 @@ class OpgaveindbakkeClient:
             try:
                 processing = frame.locator(PROCESSING_INDICATOR).first
 
-                if (
-                    await processing.count() > 0
-                    and await processing.is_visible()
-                ):
+                if await processing.count() > 0 and await processing.is_visible():
                     stable_ms = 0
                     previous_state = None
                 else:
@@ -429,9 +406,7 @@ class OpgaveindbakkeClient:
             await self._page.wait_for_timeout(POLL_INTERVAL_MS)
             elapsed_ms += POLL_INTERVAL_MS
 
-        raise OpgaveindbakkeError(
-            "Den nye opgavetabel blev ikke stabil."
-        )
+        raise OpgaveindbakkeError("Den nye opgavetabel blev ikke stabil.")
 
     async def _read_table(
         self,
@@ -555,9 +530,7 @@ class OpgaveindbakkeClient:
     async def _get_visible_data_rows(self, table: Locator) -> list[Locator]:
         """Gem klikbare datarækker til ``aabn_foerste_opgave()``."""
 
-        candidates = table.locator(
-            "tbody tr:not(:has(td.dataTables_empty))"
-        )
+        candidates = table.locator("tbody tr:not(:has(td.dataTables_empty))")
         rows: list[Locator] = []
 
         for index in range(await candidates.count()):

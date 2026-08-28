@@ -118,9 +118,7 @@ def ky_credential_name(
 ) -> str:
     """Returnér navnet på credential-posten i Automation Server."""
 
-    value = str(
-        pytestconfig.getoption("--ky-credential-name") or ""
-    ).strip()
+    value = str(pytestconfig.getoption("--ky-credential-name") or "").strip()
     if not value:
         pytest.fail(
             "--ky-credential-name må ikke være tom.",

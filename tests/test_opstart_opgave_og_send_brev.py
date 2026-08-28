@@ -1,48 +1,41 @@
 """Integrationstest for det fulde Send brev-flow uden afsendelse.
 
-Ansvarsfordeling:
-- ``borgere.opstart_opgave`` åbner den generelle KY-opgave og returnerer
-  opgavecheckpointet.
-- ``send_brev`` udfører alle Send brev-specifikke handlinger.
-- ``saet_fysisk_post`` bruger JavaScript og kaldes som den sidste ændring af
-  formularen.
-- ``test_cpr`` leveres af ``tests/conftest.py`` fra ``TEST_CPR`` i .env eller
-  fra ``--test-cpr``.
+Den faste rækkefølge er:
+
+1. Launch KY.
+2. Fremsøg borgeren.
+3. Kald ``borgere.opstart_opgave``.
+4. Overdrag den allerede åbne opgave til ``udfyld_send_brev``.
+
+``opstart_opgave`` afgør, om en tidligere opgave skal genoptages, eller om en
+ny opgave skal oprettes. ``udfyld_send_brev`` åbner aldrig selv en opgave.
 
 Kør:
     uv run pytest tests/test_opstart_opgave_og_send_brev.py -s -vv
 
-Testen klikker ikke på Godkend, og brevet bliver ikke sendt.
+Testen bruger ``test=True`` og klikker derfor ikke på Godkend.
 """
 
 from __future__ import annotations
 
+import os
 from pprint import pprint
 from time import perf_counter
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import pytest
 from playwright.async_api import Page
 from q_haderslev_vbo.playwright.browser_session import BrowserSession
 
-from ky_client.functionality.borgere import (
-    naviger_til_borger_async,
-    opstart_opgave,
-)
+from ky_client.functionality.borgere import naviger_til_borger, opstart_opgave
 from ky_client.functionality.launch import (
     has_jsessionid,
     is_ky_error_url,
     is_ky_url,
     launch_ky,
 )
+from ky_client.functionality.send_brev import send_brev
 from ky_client.selectors import KYSelectors
-from ky_client.functionality.send_brev import (
-    saet_fysisk_post,
-    vaelg_brevskabelon_fra_sti,
-    vaelg_sag_til_brev,
-    vaelg_standard_bilag,
-    vent_efter_bilag_dropdown_er_minimeret,
-)
 
 pytestmark = [pytest.mark.integration, pytest.mark.anyio]
 
@@ -55,6 +48,8 @@ SEND_BREV_MENU_STI = (
     "Send brev",
 )
 
+ENV_TIDLIGERE_OPGAVE_ID = "TIDLIGERE_OPGAVE_ID"
+
 SAG_SOEGNING = "RESJR-IIKVOV"
 MEDTAG_AKTIVE_SAGER = False
 MEDTAG_PASSIVE_SAGER = True
@@ -65,10 +60,7 @@ BREVSKABELON_STI = (
     "Afgørelse efter opfølgning - fleks gl. ord. selv",
 )
 
-STANDARD_BILAG_TITEL = (
-    "Oplysningspligt Hjælp til forsørgelse"
-)
-
+STANDARD_BILAG_TITEL = "Oplysningspligt Hjælp til forsørgelse"
 SEND_SOM_FYSISK_POST = True
 
 
@@ -88,7 +80,7 @@ async def test_opstart_opgave_og_send_brev(
     test_cpr: str,
     request: pytest.FixtureRequest,
 ) -> None:
-    """Klargør Send brev og sæt fysisk post sidst uden at sende brevet."""
+    """Åbn eller genoptag Send brev, udfyld, men afsend ikke brevet."""
 
     page = ky_page
     session = automation_session
@@ -100,10 +92,30 @@ async def test_opstart_opgave_og_send_brev(
     _print_step("STARTER TIMER OG LAUNCHER KY")
     start_tid = perf_counter()
 
+    assert ky_credential_name.strip(), "ky_credential_name er tomt."
+
+    print(f"URL før launch: {page.url}", flush=True)
+    print(f"Er KY-URL før launch: {is_ky_url(page)}", flush=True)
+    print(
+        f"Har JSESSIONID før launch: {await has_jsessionid(page)}",
+        flush=True,
+    )
+    print(
+        f"Credential-post anvendt: {ky_credential_name!r}",
+        flush=True,
+    )
+
     await launch_ky(
         page=page,
         session=session,
         credential_name=ky_credential_name,
+    )
+
+    print(f"URL efter launch: {page.url}", flush=True)
+    print(f"Er KY-URL efter launch: {is_ky_url(page)}", flush=True)
+    print(
+        f"Har JSESSIONID efter launch: {await has_jsessionid(page)}",
+        flush=True,
     )
 
     assert not page.is_closed(), "KY-siden blev lukket under launch."
@@ -113,7 +125,7 @@ async def test_opstart_opgave_og_send_brev(
 
     _print_step("FREMSØGER BORGER")
 
-    borger_url = await naviger_til_borger_async(
+    borger_url = await naviger_til_borger(
         page=page,
         cpr=test_cpr,
         timeout=PAGE_TIMEOUT_MS,
@@ -121,96 +133,70 @@ async def test_opstart_opgave_og_send_brev(
 
     assert borger_url, "Borgeropslaget returnerede ingen URL."
 
-    _print_step("STARTER SEND BREV VIA BORGERE.OPSTART_OPGAVE")
+    tidligere_opgave_id = _hent_valgfrit_opgave_id()
+    item_data: dict[str, Any] = {"box": {}}
+
+    if tidligere_opgave_id:
+        print(
+            f"Forsøger at genoptage Send brev-opgave {tidligere_opgave_id!r}.",
+            flush=True,
+        )
+    else:
+        print(
+            "Intet tidligere opgave-ID. opstart_opgave opretter en ny opgave.",
+            flush=True,
+        )
+
+    _print_step("STARTER ELLER GENOPTAGER SEND BREV VIA OPSTART_OPGAVE")
 
     checkpoint = await opstart_opgave(
         page=page,
         menu_sti=SEND_BREV_MENU_STI,
+        item_data=item_data,
+        opgave_id=tidligere_opgave_id,
         timeout=PAGE_TIMEOUT_MS,
     )
 
-    assert checkpoint["opgave_id"], "Checkpointet mangler opgave-ID."
-    assert checkpoint["opgave_url"], "Checkpointet mangler opgave-URL."
-    assert checkpoint["opgave_navn"], "Checkpointet mangler opgavenavn."
-    assert checkpoint["borger_url"] == borger_url
-    assert checkpoint["opgave_id"] in checkpoint["opgave_url"]
+    _kontroller_checkpoint(
+        checkpoint=checkpoint,
+        item_data=item_data,
+        borger_url=borger_url,
+        tidligere_opgave_id=tidligere_opgave_id,
+    )
 
     print("Opgavecheckpoint:")
     pprint(checkpoint, sort_dicts=False)
 
-    request.node.user_properties.extend(
-        [
-            ("borger_url", checkpoint["borger_url"]),
-            ("opgave_id", checkpoint["opgave_id"]),
-            ("opgave_url", checkpoint["opgave_url"]),
-            ("opgave_navn", checkpoint["opgave_navn"]),
-        ]
-    )
+    _print_step("OVERDRAGER DEN ÅBNE OPGAVE TIL UDFYLD_SEND_BREV")
 
-    _print_step("VÆLGER SAG")
-
-    valgt_sag = await vaelg_sag_til_brev(
+    resultat = await send_brev(
         page=page,
-        soegevaerdi=SAG_SOEGNING,
+        checkpoint=checkpoint,
+        sag=SAG_SOEGNING,
+        skabelon_sti=BREVSKABELON_STI,
+        bilag_titel=STANDARD_BILAG_TITEL,
+        fysisk_post=SEND_SOM_FYSISK_POST,
         aktive=MEDTAG_AKTIVE_SAGER,
         passive=MEDTAG_PASSIVE_SAGER,
+        test=True,
         timeout=PAGE_TIMEOUT_MS,
     )
 
-    assert valgt_sag["sag_id"], "Den valgte sag mangler sag-ID."
+    assert resultat["opgave_id"] == checkpoint["opgave_id"]
+    assert resultat["opgave_navn"].casefold() == "Send brev".casefold()
+    assert resultat["sag_id"], "Den valgte sag mangler sag-ID."
+    assert resultat["brevskabelon"].casefold() == BREVSKABELON_STI[-1].casefold()
+    assert resultat["bilag_titel"].casefold() == STANDARD_BILAG_TITEL.casefold()
+    assert resultat["bilag_noegle"], "Standardbilaget mangler nøgle."
+    assert resultat["fysisk_post"] is SEND_SOM_FYSISK_POST
+    assert resultat["test"] is True
+    assert resultat["sendt"] is False
 
-    _print_step("VÆLGER BREVSKABELON VIA FLX > AFGØRELSE")
-
-    valgt_skabelon = await vaelg_brevskabelon_fra_sti(
-        page=page,
-        skabelon_sti=BREVSKABELON_STI,
-        timeout=PAGE_TIMEOUT_MS,
-    )
-
-    assert valgt_skabelon.casefold() == BREVSKABELON_STI[-1].casefold(), (
-        "Den valgte brevskabelon matcher ikke sidste element i mappestien."
-    )
-
-    _print_step("VÆLGER OG TILFØJER STANDARD BILAG")
-
-    valgt_bilag = await vaelg_standard_bilag(
-        page=page,
-        bilag_titel=STANDARD_BILAG_TITEL,
-        timeout=PAGE_TIMEOUT_MS,
-    )
-
-    assert valgt_bilag["titel"].casefold() == (
-        STANDARD_BILAG_TITEL.casefold()
-    )
-    assert valgt_bilag["noegle"], "Standardbilaget mangler nøgle."
-
-    _print_step("VENTER PÅ MINIMERET BILAG-DROPDOWN")
-
-    await vent_efter_bilag_dropdown_er_minimeret(
-        page=page,
-        timeout=PAGE_TIMEOUT_MS,
-        wait_after_closed_ms=1_500,
-    )
-
-    _print_step("SÆTTER FYSISK POST SOM SIDSTE FORMULARÆNDRING")
-
-    # Dette er med vilje den sidste funktionelle ændring af formularen.
-    # send_brev.saet_fysisk_post bruger den fungerende JavaScript-metode.
-    fysisk_post = await saet_fysisk_post(
-        page=page,
-        fysisk_post=SEND_SOM_FYSISK_POST,
-        timeout=PAGE_TIMEOUT_MS,
-    )
-
-    assert fysisk_post is SEND_SOM_FYSISK_POST, (
-        "Fysisk post fik ikke den ønskede boolske tilstand."
-    )
-
-    # Herefter udføres kun read-only kontrol, screenshot og tidsmåling.
+    # udfyld_send_brev sætter fysisk post som sidste formularændring. Herefter
+    # foretager testen kun read-only kontrol, screenshot og tidsmåling.
     brevtype_status = await _laes_brevtype_status(page)
 
     assert brevtype_status["synlig"] is SEND_SOM_FYSISK_POST
-
     if SEND_SOM_FYSISK_POST:
         assert brevtype_status["display"] == "table-row"
         assert brevtype_status["value"] == "1"
@@ -227,11 +213,17 @@ async def test_opstart_opgave_og_send_brev(
 
     request.node.user_properties.extend(
         [
-            ("valgt_sag_id", valgt_sag["sag_id"]),
-            ("valgt_brevskabelon", valgt_skabelon),
-            ("valgt_standard_bilag", valgt_bilag["titel"]),
-            ("valgt_standard_bilag_noegle", valgt_bilag["noegle"]),
-            ("fysisk_post", fysisk_post),
+            ("borger_url", resultat["borger_url"]),
+            ("opgave_id", resultat["opgave_id"]),
+            ("opgave_url", resultat["opgave_url"]),
+            ("opgave_navn", resultat["opgave_navn"]),
+            ("genoptaget", resultat["genoptaget"]),
+            ("kilde", resultat["kilde"]),
+            ("valgt_sag_id", resultat["sag_id"]),
+            ("valgt_brevskabelon", resultat["brevskabelon"]),
+            ("valgt_standard_bilag", resultat["bilag_titel"]),
+            ("valgt_standard_bilag_noegle", resultat["bilag_noegle"]),
+            ("fysisk_post", resultat["fysisk_post"]),
             ("brevtype_display", brevtype_status["display"]),
             ("brevtype_value", brevtype_status["value"]),
             ("brevtype_text", brevtype_status["text"]),
@@ -242,23 +234,60 @@ async def test_opstart_opgave_og_send_brev(
 
     _print_step("TESTEN ER FÆRDIG UDEN AFSENDELSE")
     print(f"Samlet køretid fra launch til mål: {samlet_tid}")
+    print(f"Genoptaget: {resultat['genoptaget']}")
+    print(f"Kilde: {resultat['kilde']}")
     print("Godkend-knappen er ikke klikket.")
     print("Brevet er ikke sendt.")
     print("Browseren lukker automatisk om 5 sekunder.")
 
-    # Timeren er allerede stoppet; de fem sekunder indgår ikke i køretiden.
     await page.wait_for_timeout(LUK_BROWSER_EFTER_MS)
+
+
+def _hent_valgfrit_opgave_id() -> str | None:
+    """Læs et valgfrit tidligere opgave-ID fra miljøet."""
+
+    value = os.getenv(ENV_TIDLIGERE_OPGAVE_ID, "").strip()
+    if value.casefold() in {"", "null", "none", "nul"}:
+        return None
+    return value
+
+
+def _kontroller_checkpoint(
+    checkpoint: dict[str, Any],
+    item_data: dict[str, Any],
+    borger_url: str,
+    tidligere_opgave_id: str | None,
+) -> None:
+    """Kontrollér checkpointet for både ny og genoptaget opgave."""
+
+    assert checkpoint["opgave_id"], "Checkpointet mangler opgave-ID."
+    assert checkpoint["opgave_url"], "Checkpointet mangler opgave-URL."
+    assert checkpoint["opgave_navn"], "Checkpointet mangler opgavenavn."
+    assert checkpoint["borger_url"] == borger_url
+    assert checkpoint["opgave_id"] in checkpoint["opgave_url"]
+    assert checkpoint["opgave_navn"].casefold() == "Send brev".casefold()
+    assert tuple(checkpoint["menu_sti"]) == SEND_BREV_MENU_STI
+    assert checkpoint["genoptaget"] in {True, False}
+    assert checkpoint["kilde"] in {"ny_opgave", "ubehandlede_opgaver"}
+
+    if checkpoint["genoptaget"]:
+        assert tidligere_opgave_id is not None
+        assert checkpoint["opgave_id"].casefold() == tidligere_opgave_id.casefold()
+        assert checkpoint["kilde"] == "ubehandlede_opgaver"
+    else:
+        assert checkpoint["kilde"] == "ny_opgave"
+
+    box = item_data["box"]
+    assert box["Aktiv Opgave-Id"] == checkpoint["opgave_id"]
+    assert box["Aktiv Opgave URL"] == checkpoint["opgave_url"]
+    assert box["Aktiv Opgavenavn"] == checkpoint["opgave_navn"]
 
 
 async def _laes_brevtype_status(page: Page) -> BrevtypeStatus:
     """Læs Brevtype-status uden at ændre formularen."""
 
-    container = page.locator(
-        KYSelectors.Borgere.SEND_BREV_POSTAGE_CONTAINER
-    ).last
-    postage_select = page.locator(
-        KYSelectors.Borgere.SEND_BREV_POSTAGE_TYPE
-    ).last
+    container = page.locator(KYSelectors.Borgere.SEND_BREV_POSTAGE_CONTAINER).last
+    postage_select = page.locator(KYSelectors.Borgere.SEND_BREV_POSTAGE_TYPE).last
 
     synlig = await container.is_visible()
     display = ""
@@ -276,9 +305,7 @@ async def _laes_brevtype_status(page: Page) -> BrevtypeStatus:
             timeout=ACTION_TIMEOUT_MS,
         )
         value = await postage_select.input_value()
-        text = (
-            await postage_select.locator("option:checked").inner_text()
-        ).strip()
+        text = (await postage_select.locator("option:checked").inner_text()).strip()
 
     status: BrevtypeStatus = {
         "synlig": synlig,

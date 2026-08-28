@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import TypedDict
-from urllib.parse import urljoin
+from typing import Any, TypedDict
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 from playwright.async_api import Frame, Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -24,17 +24,16 @@ STABLE_CHECKS = 4
 WAIT_AFTER_TAB_CLOSE_MS = 1_000
 MAX_CLOSE_ATTEMPTS = 3
 
-PERSON_TAB_SELECTOR = (
-    "li.tab.topmenu-tab[data-tab-target-id='PERSON']"
-)
+AKTIV_OPGAVE_ID_KEY = "Aktiv Opgave-Id"
+AKTIV_OPGAVE_URL_KEY = "Aktiv Opgave URL"
+AKTIV_OPGAVE_NAVN_KEY = "Aktiv Opgavenavn"
+
+PERSON_TAB_SELECTOR = "li.tab.topmenu-tab[data-tab-target-id='PERSON']"
 PERSON_CLOSE_BUTTON_SELECTOR = (
     "li.tab.topmenu-tab[data-tab-target-id='PERSON'] "
     ".navigation-close-tab[data-entity-type='PERSON']"
 )
-ACTIVE_PERSON_TAB_SELECTOR = (
-    "li.tab.topmenu-tab.active[data-tab-target-id='PERSON']"
-)
-
+ACTIVE_PERSON_TAB_SELECTOR = "li.tab.topmenu-tab.active[data-tab-target-id='PERSON']"
 
 
 class Personoplysning(TypedDict):
@@ -83,7 +82,7 @@ class BorgereClient:
             raise RuntimeError("KY-siden er lukket.")
         return self._page
 
-    async def naviger_til_borger_async(
+    async def naviger_til_borger(
         self,
         cpr: str,
         timeout: int = 120_000,
@@ -91,9 +90,7 @@ class BorgereClient:
     ) -> str:
         """Fremsøg en borger og registrér fanen, som opslaget åbner."""
 
-        aabne_faner_foer = await _hent_aabne_borger_ids(
-            self.page
-        )
+        aabne_faner_foer = await _hent_aabne_borger_ids(self.page)
 
         borger_url = await naviger_til_borger(
             page=self.page,
@@ -102,26 +99,18 @@ class BorgereClient:
             max_forsog=max_forsog,
         )
 
-        person_id = _hent_person_id_fra_borger_url(
-            borger_url
-        )
+        person_id = _hent_person_id_fra_borger_url(borger_url)
 
         if not person_id:
-            raise RuntimeError(
-                "Den validerede borger-URL mangler en gyldig pId."
-            )
+            raise RuntimeError("Den validerede borger-URL mangler en gyldig pId.")
 
-        aabne_faner_efter = await _hent_aabne_borger_ids(
-            self.page
-        )
+        aabne_faner_efter = await _hent_aabne_borger_ids(self.page)
 
         nye_faner = aabne_faner_efter - aabne_faner_foer
 
         for entity_id in nye_faner:
             if entity_id not in self._registrerede_borgerfane_ids:
-                self._registrerede_borgerfane_ids.append(
-                    entity_id
-                )
+                self._registrerede_borgerfane_ids.append(entity_id)
 
         # Normalt matcher pId og data-entity-id. Hvis den aktuelle pId
         # faktisk findes blandt fanernes entity-id'er, registreres den også.
@@ -129,9 +118,7 @@ class BorgereClient:
             person_id in aabne_faner_efter
             and person_id not in self._registrerede_borgerfane_ids
         ):
-            self._registrerede_borgerfane_ids.append(
-                person_id
-            )
+            self._registrerede_borgerfane_ids.append(person_id)
 
         self.borger_url = borger_url
         self.p_id = person_id
@@ -163,9 +150,7 @@ class BorgereClient:
         snapshot = await _laes_personoplysninger_snapshot(table)
         snapshot_cpr = _normaliser_cpr(str(snapshot.get("cpr", "")))
         if snapshot_cpr != normaliseret_cpr:
-            raise RuntimeError(
-                "Personoplysninger tilhører ikke det forventede CPR."
-            )
+            raise RuntimeError("Personoplysninger tilhører ikke det forventede CPR.")
 
         raw_rows = snapshot.get("rows", [])
         if not isinstance(raw_rows, list):
@@ -186,7 +171,7 @@ class BorgereClient:
             )
         return resultat
 
-    async def hent_borger_async(
+    async def hent_borger(
         self,
         cpr: str,
         timeout: int = 120_000,
@@ -194,7 +179,7 @@ class BorgereClient:
     ) -> BorgerResultat:
         """Fremsøg borgeren og returnér pId, URL og Personoplysninger."""
 
-        borger_url = await self.naviger_til_borger_async(
+        borger_url = await self.naviger_til_borger(
             cpr=cpr,
             timeout=timeout,
             max_forsog=max_forsog,
@@ -226,12 +211,12 @@ class BorgereClient:
             for oplysning in personoplysninger
         )
 
-    async def hent_aabne_borger_ids_async(self) -> set[str]:
+    async def hent_aabne_borger_ids(self) -> set[str]:
         """Returnér entity-id'er for alle aktuelt åbne PERSON-faner."""
 
         return await _hent_aabne_borger_ids(self.page)
 
-    async def luk_borgerfaner_async(
+    async def luk_borgerfaner(
         self,
         entity_ids: Sequence[str],
         timeout_ms: int = ACTION_TIMEOUT_MS,
@@ -244,7 +229,10 @@ class BorgereClient:
         # og genfinder faneknapperne efter KY's DOM-opdateringer.
         await luk_borgerfaner(
             page=self.page,
-            entity_ids=list(entity_ids),
+            entity_ids=entity_ids,
+            timeout_ms=timeout_ms,
+            maks_forsog=maks_forsog,
+            vent_efter_gennemloeb_ms=vent_efter_gennemloeb_ms,
         )
 
 
@@ -298,13 +286,9 @@ async def naviger_til_borger(
             await search_input.fill(cpr)
             await search_input.dispatch_event("change")
 
-            actual_cpr = _normaliser_cpr(
-                await search_input.input_value()
-            )
+            actual_cpr = _normaliser_cpr(await search_input.input_value())
             if actual_cpr != cpr:
-                raise RuntimeError(
-                    "CPR blev ikke indsat korrekt i topsearch."
-                )
+                raise RuntimeError("CPR blev ikke indsat korrekt i topsearch.")
 
             print("Hele CPR-værdien er indsat i topsearch.")
             await search_input.press("Enter")
@@ -317,13 +301,9 @@ async def naviger_til_borger(
                 )
             except PlaywrightTimeoutError:
                 # Første Enter kan alene vælge autocomplete-resultatet.
-                search_input = page.locator(
-                    KYSelectors.Main.TOP_SEARCH
-                ).first
+                search_input = page.locator(KYSelectors.Main.TOP_SEARCH).first
                 await search_input.wait_for(state="visible", timeout=timeout)
-                if _normaliser_cpr(
-                    await search_input.input_value()
-                ) != cpr:
+                if _normaliser_cpr(await search_input.input_value()) != cpr:
                     await search_input.fill(cpr)
                     await search_input.dispatch_event("change")
                 await search_input.press("Enter")
@@ -337,15 +317,11 @@ async def naviger_til_borger(
             seneste_fundne_cpr = fundet_cpr
 
             print(f"Fremsøgt CPR: {_masker_cpr(cpr)}")
-            print(
-                "CPR fra Personoplysninger: "
-                f"{_masker_cpr(fundet_cpr)}"
-            )
+            print(f"CPR fra Personoplysninger: {_masker_cpr(fundet_cpr)}")
 
             if fundet_cpr != cpr:
                 seneste_fejl = (
-                    "CPR fra Personoplysninger matcher ikke det "
-                    "fremsøgte CPR."
+                    "CPR fra Personoplysninger matcher ikke det fremsøgte CPR."
                 )
                 print("Forkert borger blev vist.")
                 await _luk_forkert_borgerfane(
@@ -372,10 +348,7 @@ async def naviger_til_borger(
 
         except Exception as error:
             seneste_fejl = f"{type(error).__name__}: {error}"
-            print(
-                f"Borgeropslag fejlede på forsøg {forsog}: "
-                f"{seneste_fejl}"
-            )
+            print(f"Borgeropslag fejlede på forsøg {forsog}: {seneste_fejl}")
             await _luk_faner_aabnet_under_forsog(
                 page=page,
                 aabne_ids_foer=aabne_ids_foer,
@@ -439,9 +412,7 @@ async def _vent_paa_stabil_personoplysninger_tabel(
                     table = tables.nth(table_index)
                     if not await table.is_visible():
                         continue
-                    snapshot = await _laes_personoplysninger_snapshot(
-                        table
-                    )
+                    snapshot = await _laes_personoplysninger_snapshot(table)
                     readable_rows = snapshot.get("rows", [])
                     if readable_rows:
                         candidates.append((table, snapshot))
@@ -476,10 +447,7 @@ async def _vent_paa_stabil_personoplysninger_tabel(
             previous_signature = None
 
         if elapsed_ms % 2_000 == 0:
-            print(
-                "Venter på stabil Personoplysninger-tabel: "
-                f"{last_diagnostic}"
-            )
+            print(f"Venter på stabil Personoplysninger-tabel: {last_diagnostic}")
 
         await page.wait_for_timeout(poll_interval_ms)
         elapsed_ms += poll_interval_ms
@@ -540,9 +508,7 @@ async def _laes_personoplysninger_snapshot(table) -> dict[str, object]:
         """
     )
     if not isinstance(snapshot, dict):
-        raise RuntimeError(
-            "Personoplysninger gav ikke et læsbart DOM-snapshot."
-        )
+        raise RuntimeError("Personoplysninger gav ikke et læsbart DOM-snapshot.")
     return snapshot
 
 
@@ -551,9 +517,7 @@ async def _hent_cpr_fra_personoplysninger(table) -> str:
     snapshot = await _laes_personoplysninger_snapshot(table)
     cpr = _normaliser_cpr(str(snapshot.get("cpr", "")))
     if not cpr.isdigit() or len(cpr) != 10:
-        raise RuntimeError(
-            "CPR-rækken kunne ikke læses korrekt fra Personoplysninger."
-        )
+        raise RuntimeError("CPR-rækken kunne ikke læses korrekt fra Personoplysninger.")
     return cpr
 
 
@@ -567,9 +531,7 @@ async def _hent_aabne_borger_ids(page: Page) -> set[str]:
     ids: set[str] = set()
     for index in range(await buttons.count()):
         try:
-            entity_id = await buttons.nth(index).get_attribute(
-                "data-entity-id"
-            )
+            entity_id = await buttons.nth(index).get_attribute("data-entity-id")
         except Exception:
             continue
         if entity_id:
@@ -599,14 +561,11 @@ async def _luk_forkert_borgerfane(
     active = page.locator(active_selector).first
     if await active.count() == 0:
         raise RuntimeError(
-            "Forkert borger blev vist, men den aktive borgerfane "
-            "kunne ikke findes."
+            "Forkert borger blev vist, men den aktive borgerfane kunne ikke findes."
         )
     entity_id = await active.get_attribute("data-entity-id")
     if not entity_id:
-        raise RuntimeError(
-            "Den aktive borgerfane mangler data-entity-id."
-        )
+        raise RuntimeError("Den aktive borgerfane mangler data-entity-id.")
     await luk_borgerfane(page, entity_id, timeout_ms)
 
 
@@ -673,8 +632,7 @@ async def luk_borgerfane(
         elapsed_ms += 250
 
     raise PlaywrightTimeoutError(
-        "PERSON-fanen blev ikke lukket inden for tidsgrænsen. "
-        f"Entity-id={entity_id}."
+        f"PERSON-fanen blev ikke lukket inden for tidsgrænsen. Entity-id={entity_id}."
     )
 
 
@@ -709,7 +667,9 @@ def _masker_cpr(value: str) -> str:
     cpr = _normaliser_cpr(value)
     return f"******{cpr[-4:]}" if len(cpr) == 10 else "[ukendt CPR]"
 
+
 # Hjælpefunktioner flyttet fra den fungerende test
+
 
 async def find_aktivt_topsearch(
     page: Page,
@@ -738,9 +698,7 @@ async def find_aktivt_topsearch(
 
     while elapsed_ms < timeout_ms:
         if page.is_closed():
-            raise RuntimeError(
-                "KY-siden blev lukket under søgningen efter topSearch."
-            )
+            raise RuntimeError("KY-siden blev lukket under søgningen efter topSearch.")
 
         diagnostic: list[dict[str, object]] = []
 
@@ -780,8 +738,7 @@ async def find_aktivt_topsearch(
 
         if elapsed_ms % 2_000 == 0:
             print(
-                "Borgeropslag: venter på aktivt topSearch. "
-                f"Diagnose: {diagnostic}",
+                f"Borgeropslag: venter på aktivt topSearch. Diagnose: {diagnostic}",
                 flush=True,
             )
 
@@ -793,6 +750,7 @@ async def find_aktivt_topsearch(
         f"ikke fundet inden for {timeout_ms / 1000:.0f} sekunder. "
         f"URL: {page.url}. Diagnose: {last_diagnostic!r}"
     )
+
 
 async def klik_topsearch_knap(
     page: Page,
@@ -842,6 +800,7 @@ async def klik_topsearch_knap(
 
     return False
 
+
 async def vent_paa_synlig_personoplysninger(
     page: Page,
     timeout_ms: int,
@@ -857,17 +816,14 @@ async def vent_paa_synlig_personoplysninger(
     while elapsed_ms < timeout_ms:
         if page.is_closed():
             raise RuntimeError(
-                "KY-siden blev lukket under ventetiden på "
-                "Personoplysninger."
+                "KY-siden blev lukket under ventetiden på Personoplysninger."
             )
 
         diagnostic: list[dict[str, object]] = []
 
         for frame in page.frames:
             try:
-                tables = frame.locator(
-                    KYSelectors.Borgere.PERSON_OPLYSNINGER
-                )
+                tables = frame.locator(KYSelectors.Borgere.PERSON_OPLYSNINGER)
 
                 table_count = await tables.count()
 
@@ -884,9 +840,7 @@ async def vent_paa_synlig_personoplysninger(
                     if not await table.is_visible():
                         continue
 
-                    readable_rows = await antal_laesbare_person_rows(
-                        table
-                    )
+                    readable_rows = await antal_laesbare_person_rows(table)
 
                     frame_diagnostic["synlig_tabel"] = True
                     frame_diagnostic["laesbare_raekker"] = readable_rows
@@ -898,9 +852,7 @@ async def vent_paa_synlig_personoplysninger(
                 diagnostic.append(
                     {
                         "frame": frame.url,
-                        "fejl": (
-                            f"{type(error).__name__}: {error}"
-                        ),
+                        "fejl": (f"{type(error).__name__}: {error}"),
                     }
                 )
 
@@ -908,8 +860,7 @@ async def vent_paa_synlig_personoplysninger(
 
         if elapsed_ms % 2_000 == 0:
             print(
-                "Venter på synlig Personoplysninger-tabel: "
-                f"{diagnostic}",
+                f"Venter på synlig Personoplysninger-tabel: {diagnostic}",
                 flush=True,
             )
 
@@ -922,6 +873,7 @@ async def vent_paa_synlig_personoplysninger(
         f"{timeout_ms / 1000:.0f} sekunder. "
         f"URL: {page.url}. Diagnose: {last_diagnostic!r}"
     )
+
 
 async def antal_laesbare_person_rows(
     table: Locator,
@@ -971,6 +923,7 @@ async def antal_laesbare_person_rows(
             """
         )
     )
+
 
 async def laes_personoplysninger(
     table: Locator,
@@ -1028,9 +981,7 @@ async def laes_personoplysninger(
     )
 
     if not isinstance(rows, list):
-        raise RuntimeError(
-            "Personoplysninger blev ikke returneret som en liste."
-        )
+        raise RuntimeError("Personoplysninger blev ikke returneret som en liste.")
 
     result: list[dict[str, str]] = []
 
@@ -1038,9 +989,7 @@ async def laes_personoplysninger(
         if not isinstance(row, dict):
             continue
 
-        label = str(
-            row.get("label", "")
-        ).strip()
+        label = str(row.get("label", "")).strip()
 
         if not label:
             continue
@@ -1048,16 +997,13 @@ async def laes_personoplysninger(
         result.append(
             {
                 "label": label,
-                "value": str(
-                    row.get("value", "")
-                ).strip(),
-                "data_id": str(
-                    row.get("data_id", "")
-                ).strip(),
+                "value": str(row.get("value", "")).strip(),
+                "data_id": str(row.get("data_id", "")).strip(),
             }
         )
 
     return result
+
 
 def print_personoplysninger(
     rows: list[dict[str, str]],
@@ -1065,9 +1011,7 @@ def print_personoplysninger(
 ) -> None:
     """Print alle udtrukne personoplysninger."""
 
-    assert rows, (
-        f"Personoplysninger for {heading} indeholdt ingen læsbare rækker."
-    )
+    assert rows, f"Personoplysninger for {heading} indeholdt ingen læsbare rækker."
 
     print(
         "",
@@ -1091,8 +1035,7 @@ def print_personoplysninger(
         start=1,
     ):
         print(
-            f"{row_number:02d}. "
-            f"{row['label']}: {row['value']}",
+            f"{row_number:02d}. {row['label']}: {row['value']}",
             flush=True,
         )
 
@@ -1109,6 +1052,7 @@ def print_personoplysninger(
         flush=True,
     )
 
+
 async def hent_person_tab_ids(
     page: Page,
 ) -> list:
@@ -1116,19 +1060,13 @@ async def hent_person_tab_ids(
     if page.is_closed():
         return []
 
-    close_buttons = page.locator(
-        PERSON_CLOSE_BUTTON_SELECTOR
-    )
+    close_buttons = page.locator(PERSON_CLOSE_BUTTON_SELECTOR)
 
     entity_ids: list[str] = []
 
     for index in range(await close_buttons.count()):
         try:
-            entity_id = await close_buttons.nth(
-                index
-            ).get_attribute(
-                "data-entity-id"
-            )
+            entity_id = await close_buttons.nth(index).get_attribute("data-entity-id")
         except Exception:
             continue
 
@@ -1142,6 +1080,7 @@ async def hent_person_tab_ids(
 
     return entity_ids
 
+
 async def vent_paa_minimum_person_tabs(
     page: Page,
     minimum_count: int,
@@ -1152,9 +1091,7 @@ async def vent_paa_minimum_person_tabs(
     elapsed_ms = 0
 
     while elapsed_ms < timeout_ms:
-        current_count = len(
-            await hent_person_tab_ids(page)
-        )
+        current_count = len(await hent_person_tab_ids(page))
 
         if current_count >= minimum_count:
             return
@@ -1171,29 +1108,35 @@ async def vent_paa_minimum_person_tabs(
         f"Fundne entity-id'er: {current_ids}"
     )
 
+
 async def luk_borgerfaner(
     page: Page,
-    entity_ids: list[str],
+    entity_ids: Sequence[str],
+    timeout_ms: int = ACTION_TIMEOUT_MS,
+    maks_forsog: int = MAX_CLOSE_ATTEMPTS,
+    vent_efter_gennemloeb_ms: int = WAIT_AFTER_TAB_CLOSE_MS,
 ) -> None:
-    """Luk de angivne PERSON-faner med højst tre gennemløb."""
+    """Luk de angivne PERSON-faner robust og verificér resultatet."""
+
+    if maks_forsog < 1:
+        raise ValueError("maks_forsog skal være mindst 1.")
 
     wanted_ids = list(
-        dict.fromkeys(entity_ids)
+        dict.fromkeys(
+            str(entity_id).strip() for entity_id in entity_ids if str(entity_id).strip()
+        )
     )
+
+    if not wanted_ids:
+        return
 
     for attempt in range(
         1,
-        MAX_CLOSE_ATTEMPTS + 1,
+        maks_forsog + 1,
     ):
-        open_ids = set(
-            await hent_person_tab_ids(page)
-        )
+        open_ids = set(await hent_person_tab_ids(page))
 
-        remaining_ids = [
-            entity_id
-            for entity_id in wanted_ids
-            if entity_id in open_ids
-        ]
+        remaining_ids = [entity_id for entity_id in wanted_ids if entity_id in open_ids]
 
         if not remaining_ids:
             print(
@@ -1203,7 +1146,7 @@ async def luk_borgerfaner(
             return
 
         print(
-            f"Lukkeforsøg {attempt}/{MAX_CLOSE_ATTEMPTS}. "
+            f"Lukkeforsøg {attempt}/{maks_forsog}. "
             f"Resterende faner: {len(remaining_ids)}",
             flush=True,
         )
@@ -1215,6 +1158,7 @@ async def luk_borgerfaner(
                 await luk_borgerfane(
                     page=page,
                     entity_id=entity_id,
+                    timeout_ms=timeout_ms,
                 )
             except Exception as error:
                 print(
@@ -1224,25 +1168,18 @@ async def luk_borgerfaner(
                     flush=True,
                 )
 
-        await page.wait_for_timeout(
-            WAIT_AFTER_TAB_CLOSE_MS
-        )
+        await page.wait_for_timeout(vent_efter_gennemloeb_ms)
 
-    open_ids = set(
-        await hent_person_tab_ids(page)
-    )
+    open_ids = set(await hent_person_tab_ids(page))
 
-    remaining_ids = [
-        entity_id
-        for entity_id in wanted_ids
-        if entity_id in open_ids
-    ]
+    remaining_ids = [entity_id for entity_id in wanted_ids if entity_id in open_ids]
 
     if remaining_ids:
         raise AssertionError(
             "Det lykkedes ikke at lukke alle borgerfaner. "
             f"Resterende entity-id'er: {remaining_ids}"
         )
+
 
 async def haandter_eventuel_lukke_dialog(
     page: Page,
@@ -1260,9 +1197,7 @@ async def haandter_eventuel_lukke_dialog(
 
     for selector in selectors:
         try:
-            buttons = page.locator(
-                f"{selector}:visible"
-            )
+            buttons = page.locator(f"{selector}:visible")
 
             if await buttons.count() == 0:
                 continue
@@ -1273,8 +1208,7 @@ async def haandter_eventuel_lukke_dialog(
                 continue
 
             print(
-                "KY viste en dialog ved fanelukning. "
-                "Klikker på 'Afbryd og gem'.",
+                "KY viste en dialog ved fanelukning. Klikker på 'Afbryd og gem'.",
                 flush=True,
             )
 
@@ -1287,6 +1221,7 @@ async def haandter_eventuel_lukke_dialog(
         except Exception:
             continue
 
+
 async def vent_paa_person_fane_lukket(
     page: Page,
     entity_id: str,
@@ -1294,10 +1229,7 @@ async def vent_paa_person_fane_lukket(
 ) -> None:
     """Vent på, at PERSON-fanens lukknap er fjernet eller skjult."""
 
-    selector = (
-        f"{PERSON_CLOSE_BUTTON_SELECTOR}"
-        f"[data-entity-id='{entity_id}']"
-    )
+    selector = f"{PERSON_CLOSE_BUTTON_SELECTOR}[data-entity-id='{entity_id}']"
 
     elapsed_ms = 0
 
@@ -1329,7 +1261,9 @@ async def vent_paa_person_fane_lukket(
         f"Entity-id: {entity_id}"
     )
 
+
 # Generisk asynkron opgavefunktionalitet
+
 
 class OpgaveCheckpoint(TypedDict):
     """Data, som kan gemmes og bruges til at genoptage en KY-opgave."""
@@ -1363,9 +1297,7 @@ async def aabn_opgave_og_hent_url(
     """
 
     normalized_path = tuple(
-        _normaliser_tekst(item)
-        for item in menu_sti
-        if _normaliser_tekst(item)
+        _normaliser_tekst(item) for item in menu_sti if _normaliser_tekst(item)
     )
 
     if not normalized_path:
@@ -1377,9 +1309,7 @@ async def aabn_opgave_og_hent_url(
     if not borger_url:
         raise RuntimeError("Borger-URL kunne ikke læses før opgaveåbning.")
 
-    handlinger = page.locator(
-        KYSelectors.Borgere.HANDLINGER_DROPDOWN
-    ).first
+    handlinger = page.locator(KYSelectors.Borgere.HANDLINGER_DROPDOWN).first
     await handlinger.wait_for(state="visible", timeout=timeout)
     await handlinger.scroll_into_view_if_needed()
 
@@ -1402,9 +1332,7 @@ async def aabn_opgave_og_hent_url(
         timeout=timeout,
     )
 
-    header = page.locator(
-        "div#opgave-header.block-heading"
-    ).first
+    header = page.locator("div#opgave-header.block-heading").first
     undock_button = header.locator(
         "a.undock_panel_button[data-opgave-id][data-url]"
     ).first
@@ -1479,9 +1407,7 @@ async def _find_synligt_handlinger_menupunkt(
                 if not await candidate.is_enabled():
                     continue
 
-                visible_text = _normaliser_tekst(
-                    await candidate.inner_text()
-                )
+                visible_text = _normaliser_tekst(await candidate.inner_text())
                 if pattern.fullmatch(visible_text):
                     return candidate
         except Exception:
@@ -1511,12 +1437,9 @@ async def _vent_paa_opgave_checkpoint(
             raise RuntimeError("KY-siden blev lukket under opgaveåbningen.")
 
         loader_visible = await _er_opgave_loader_synlig(page)
-        header = page.locator(
-            "div#opgave-header.block-heading:visible"
-        )
+        header = page.locator("div#opgave-header.block-heading:visible")
         undock = page.locator(
-            "div#opgave-header "
-            "a.undock_panel_button[data-opgave-id][data-url]"
+            "div#opgave-header a.undock_panel_button[data-opgave-id][data-url]"
         )
 
         ready = False
@@ -1534,9 +1457,7 @@ async def _vent_paa_opgave_checkpoint(
                 data_url = _normaliser_tekst(
                     await button.get_attribute("data-url") or ""
                 )
-                classes = (
-                    await header.first.get_attribute("class") or ""
-                ).split()
+                classes = (await header.first.get_attribute("class") or "").split()
 
                 ready = (
                     bool(opgave_id)
@@ -1562,6 +1483,7 @@ async def _vent_paa_opgave_checkpoint(
         f"opgave-URL blev ikke tilgængeligt. Aktuel URL: {page.url}"
     )
 
+
 """Generel opstart af KY-opgaver.
 
 Indsæt indholdet i ``ky_client/functionality/borgere.py``. Funktionen er en
@@ -1569,93 +1491,599 @@ fælles indgang til eksisterende ``aabn_opgave_og_hent_url`` og indeholder
 ingen Send brev-specifik logik.
 """
 
-OPGAVE_TIMEOUT_MS = 120_000
 
+class OpstartOpgaveCheckpoint(TypedDict):
+    """Checkpoint for en ny eller sikkert genoptaget KY-opgave."""
 
-class OpgaveCheckpoint(TypedDict):
-    """Stabile oplysninger om den opgave, som KY har åbnet."""
-
-    borger_url: str
-    opgave_url: str
     opgave_id: str
     opgave_navn: str
+    opgave_url: str
+    borger_url: str
+    menu_sti: tuple[str, ...]
+    genoptaget: bool
+    kilde: str
 
 
 async def opstart_opgave(
     page: Page,
-    menu_sti: Sequence[str],
+    menu_sti: tuple[str, ...],
+    item_data: dict[str, Any] | None = None,
+    opgave_id: str | None = None,
     timeout: int = OPGAVE_TIMEOUT_MS,
-) -> OpgaveCheckpoint:
-    """Åbn en vilkårlig KY-opgave og returnér et valideret checkpoint.
+) -> OpstartOpgaveCheckpoint:
+    """Genoptag itemets ubehandlede opgave eller opret en ny.
 
-    Funktionen er generel og kan bruges til alle opgavetyper, eksempelvis::
+    Funktionen leder altid i ``Ubehandlede opgaver`` foer oprettelse.
 
-        checkpoint = await opstart_opgave(
-            page=page,
-            menu_sti=("Administration", "Send brev"),
-        )
+    En eksisterende raekke maa kun aabnes, naar alle disse krav er opfyldt:
 
-    Selve navigationen udføres af den eksisterende
-    ``aabn_opgave_og_hent_url`` i ``borgere.py``.
+    1. Raekkens ``data-id`` matcher itemets gemte aktive opgave-id.
+    2. Linkets ``data-opgave-id`` matcher samme id.
+    3. Opgavenavnet matcher sidste led i ``menu_sti`` eksakt.
+
+    Dermed kan robotten ikke overtage en anden brugers ubehandlede opgave
+    alene fordi opgaven hedder fx ``Skriv journalnotat`` eller ``Send brev``.
+
+    ``opgave_id`` har hoejeste prioritet. Ellers udledes id fra item_data.
+    Ved nyoprettelse gemmes checkpointet i item_data["box"] under de tre
+    ``Aktiv ...``-noegler, saa et senere browserforloeb kan genoptage det.
     """
 
     if page.is_closed():
-        raise RuntimeError("KY-siden er lukket før opgaven startes.")
+        raise RuntimeError("KY-siden er lukket foer opstart af opgave.")
 
-    normaliseret_sti = tuple(
-        " ".join(str(delnavn).split())
-        for delnavn in menu_sti
-        if " ".join(str(delnavn).split())
+    normaliseret_menu_sti = tuple(
+        _opstart_normaliser_tekst(menu_del)
+        for menu_del in menu_sti
+        if _opstart_normaliser_tekst(menu_del)
     )
-    if not normaliseret_sti:
-        raise ValueError("menu_sti skal indeholde mindst ét menupunkt.")
+    if not normaliseret_menu_sti:
+        raise ValueError("menu_sti skal indeholde mindst et menupunkt.")
 
-    checkpoint = await aabn_opgave_og_hent_url(
+    forventet_opgavenavn = normaliseret_menu_sti[-1]
+    borger_url = page.url
+
+    aktivt_opgave_id = _opstart_normaliser_id(opgave_id)
+    if aktivt_opgave_id is None and item_data is not None:
+        aktivt_opgave_id = hent_aktivt_opgave_id_fra_item_data(item_data)
+
+    # Der kigges altid i tabellen. Uden et id maa ingen eksisterende raekke
+    # aabnes, fordi opgavenavnet ikke er tilstraekkeligt til ejerskabskontrol.
+    eksisterende_raekke = await find_matchende_ubehandlet_opgave(
         page=page,
-        menu_sti=normaliseret_sti,
+        forventet_opgave_id=aktivt_opgave_id,
+        forventet_opgavenavn=forventet_opgavenavn,
         timeout=timeout,
     )
 
-    if page.is_closed():
-        raise RuntimeError("KY-siden blev lukket under opstart af opgaven.")
-
-    opgave_id = str(checkpoint.get("opgave_id", "")).strip()
-    opgave_url = str(checkpoint.get("opgave_url", "")).strip()
-    opgave_navn = str(checkpoint.get("opgave_navn", "")).strip()
-    borger_url = str(checkpoint.get("borger_url", "")).strip()
-
-    if not opgave_id:
-        raise RuntimeError("Opgavecheckpointet mangler opgave_id.")
-    if not opgave_url:
-        raise RuntimeError("Opgavecheckpointet mangler opgave_url.")
-    if not opgave_navn:
-        raise RuntimeError("Opgavecheckpointet mangler opgave_navn.")
-    if not borger_url:
-        raise RuntimeError("Opgavecheckpointet mangler borger_url.")
-    if opgave_id not in opgave_url:
-        raise RuntimeError(
-            "Opgavecheckpointets opgave_id indgår ikke i opgave_url. "
-            f"opgave_id={opgave_id!r}, opgave_url={opgave_url!r}."
+    if eksisterende_raekke is not None:
+        checkpoint = await aabn_matchende_ubehandlet_opgave(
+            page=page,
+            row=eksisterende_raekke,
+            forventet_opgave_id=aktivt_opgave_id,
+            forventet_opgavenavn=forventet_opgavenavn,
+            borger_url=borger_url,
+            menu_sti=normaliseret_menu_sti,
+            timeout=timeout,
         )
+        _gem_aktivt_checkpoint_i_item_data(item_data, checkpoint)
+        return checkpoint
 
-    resultat: OpgaveCheckpoint = {
-        "borger_url": borger_url,
-        "opgave_url": opgave_url,
-        "opgave_id": opgave_id,
-        "opgave_navn": opgave_navn,
+    # Hvis itemets aktive id findes i tabellen med et andet opgavenavn,
+    # rejser find_matchende_ubehandlet_opgave allerede en fejl. Kun et sikkert
+    # "ikke fundet" maa falde videre til oprettelse.
+    nyt_checkpoint = await aabn_opgave_og_hent_url(
+        page=page,
+        menu_sti=normaliseret_menu_sti,
+        timeout=timeout,
+    )
+
+    checkpoint: OpstartOpgaveCheckpoint = {
+        "opgave_id": str(nyt_checkpoint["opgave_id"]).strip(),
+        "opgave_navn": forventet_opgavenavn,
+        "opgave_url": str(nyt_checkpoint["opgave_url"]).strip(),
+        "borger_url": str(nyt_checkpoint["borger_url"]).strip(),
+        "menu_sti": tuple(nyt_checkpoint["menu_sti"]),
+        "genoptaget": False,
+        "kilde": "ny_opgave",
     }
 
-    print()
-    print("=" * 70)
-    print("OPGAVE STARTET")
-    print(f"Menusti: {' > '.join(normaliseret_sti)}")
-    print(f"Opgavenavn: {opgave_navn}")
-    print(f"Opgave-id: {opgave_id}")
-    print(f"Opgave-URL: {opgave_url}")
-    print(f"Borger-URL: {borger_url}")
-    print("=" * 70)
+    if not checkpoint["opgave_id"]:
+        raise RuntimeError("Den nyoprettede opgave mangler opgave-id.")
+    if checkpoint["opgave_navn"].casefold() != forventet_opgavenavn.casefold():
+        raise RuntimeError(
+            "Den nyoprettede opgaves navn matcher ikke menu_sti. "
+            f"Forventet={forventet_opgavenavn!r}, "
+            f"faktisk={checkpoint['opgave_navn']!r}."
+        )
 
-    return resultat
+    _gem_aktivt_checkpoint_i_item_data(item_data, checkpoint)
+    return checkpoint
+
+
+def hent_aktivt_opgave_id_fra_item_data(
+    item_data: dict[str, Any],
+) -> str | None:
+    """Udled kun det id, der sikkert kan knyttes til itemet.
+
+    Prioritet:
+    1. box["Aktiv Opgave-Id"]
+    2. box["Aktiv Opgave URL"]
+    3. box["Opgave-Id"]
+    4. box["URL"]
+    5. box["Original URL"]
+
+    De to foerste noegler skrives af ``opstart_opgave`` efter nyoprettelse.
+    """
+
+    if not isinstance(item_data, dict):
+        raise TypeError("item_data skal vaere en dictionary.")
+
+    box = item_data.get("box")
+    if not isinstance(box, dict):
+        raise TypeError("item_data['box'] skal vaere en dictionary.")
+
+    for key in (
+        AKTIV_OPGAVE_ID_KEY,
+        "Opgave-Id",
+        "Opgave-ID",
+        "opgave_id",
+        "opgave-id",
+    ):
+        id_value = _opstart_normaliser_id(box.get(key))
+        if id_value:
+            return id_value
+
+    for key in (
+        AKTIV_OPGAVE_URL_KEY,
+        "URL",
+        "Original URL",
+    ):
+        url_value = str(box.get(key) or "").strip()
+        if not url_value:
+            continue
+        id_value = hent_opgave_id_fra_url(url_value)
+        if id_value:
+            return id_value
+
+    return None
+
+
+def hent_opgave_id_fra_url(url: str) -> str | None:
+    """Udled opgave-id fra kendte query-parametre eller KY-stier."""
+
+    value = str(url or "").strip()
+    if not value:
+        return None
+
+    parsed = urlparse(value)
+    query = parse_qs(parsed.query)
+
+    for query_key in (
+        "opgaveId",
+        "opgaveid",
+        "opgave_id",
+        "taskId",
+        "taskid",
+    ):
+        query_values = query.get(query_key)
+        if query_values:
+            id_value = _opstart_normaliser_id(query_values[0])
+            if id_value:
+                return id_value
+
+    path_match = re.search(
+        r"/opgave/(?:undock/)?([A-Za-z0-9_-]{6,})/?$",
+        parsed.path,
+        flags=re.IGNORECASE,
+    )
+    if path_match:
+        return _opstart_normaliser_id(path_match.group(1))
+
+    uuid_match = re.search(
+        r"(?<![A-Fa-f0-9])"
+        r"([A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-"
+        r"[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12})"
+        r"(?![A-Fa-f0-9])",
+        value,
+    )
+    if uuid_match:
+        return _opstart_normaliser_id(uuid_match.group(1))
+
+    return None
+
+
+async def find_matchende_ubehandlet_opgave(
+    page: Page,
+    forventet_opgave_id: str | None,
+    forventet_opgavenavn: str,
+    timeout: int = OPGAVE_TIMEOUT_MS,
+) -> Locator | None:
+    """Gennemgaa Ubehandlede opgaver og returner et sikkert id+navn-match.
+
+    Uden ``forventet_opgave_id`` gennemgaas tabellen stadig, men ingen raekke
+    maa returneres. Det er den bevidste beskyttelse mod at tage andres opgaver.
+    """
+
+    forventet_opgavenavn = _opstart_kraev_tekst(
+        forventet_opgavenavn,
+        "forventet_opgavenavn",
+    )
+
+    table = page.locator(KYSelectors.Borgere.UBEHANDLEDE_OPGAVER_TABLE).first
+    try:
+        await table.wait_for(state="visible", timeout=timeout)
+    except PlaywrightTimeoutError:
+        print(
+            "Tabellen Ubehandlede opgaver er ikke synlig; "
+            "ingen eksisterende opgave kan genoptages.",
+            flush=True,
+        )
+        return None
+
+    seen_signatures: set[str] = set()
+
+    while True:
+        await _vent_paa_ubehandlede_opgaver_stabil(page, timeout)
+        rows = page.locator(KYSelectors.Borgere.UBEHANDLEDE_OPGAVER_ROWS)
+
+        first_row_id = ""
+        if await rows.count() > 0:
+            first_row_id = (await rows.first.get_attribute("data-id") or "").strip()
+        signature = f"{first_row_id}:{await rows.count()}"
+        if signature in seen_signatures:
+            break
+        seen_signatures.add(signature)
+
+        sikre_matches: list[Locator] = []
+
+        for index in range(await rows.count()):
+            row = rows.nth(index)
+            try:
+                row_id = (await row.get_attribute("data-id") or "").strip()
+                opgave_link = row.locator(
+                    KYSelectors.Borgere.UBEHANDLET_OPGAVE_LINK
+                ).first
+                link_id = (
+                    await opgave_link.get_attribute("data-opgave-id") or ""
+                ).strip()
+                row_name = _opstart_normaliser_tekst(
+                    await row.locator("td").nth(1).inner_text()
+                )
+
+                # Sammenlign kun ejerskab, hvis itemet har et id.
+                if forventet_opgave_id is None:
+                    continue
+
+                row_id_match = row_id.casefold() == forventet_opgave_id.casefold()
+                link_id_match = link_id.casefold() == forventet_opgave_id.casefold()
+
+                if not row_id_match and not link_id_match:
+                    continue
+
+                # Et delvist id-match er mistænkeligt og maa ikke ignoreres.
+                if not (row_id_match and link_id_match):
+                    raise RuntimeError(
+                        "Ubehandlede opgaver indeholder et inkonsistent id. "
+                        f"Item-id={forventet_opgave_id!r}, "
+                        f"row-id={row_id!r}, link-id={link_id!r}. "
+                        "Intet er aabnet."
+                    )
+
+                if row_name.casefold() != forventet_opgavenavn.casefold():
+                    raise RuntimeError(
+                        "Itemets opgave-id findes, men opgavenavnet matcher "
+                        "ikke inputtet. Intet er aabnet eller oprettet. "
+                        f"Id={forventet_opgave_id!r}, "
+                        f"forventet navn={forventet_opgavenavn!r}, "
+                        f"fundet navn={row_name!r}."
+                    )
+
+                sikre_matches.append(row)
+
+            except RuntimeError:
+                raise
+            except Exception:
+                continue
+
+        if len(sikre_matches) == 1:
+            return sikre_matches[0]
+        if len(sikre_matches) > 1:
+            raise RuntimeError(
+                "Flere ubehandlede opgaver har samme id og navn. Intet er aabnet."
+            )
+
+        if not await _gaa_til_naeste_ubehandlede_side(page, timeout):
+            break
+
+    print(
+        "Ingen sikker ubehandlet opgave matchede baade id og navn. "
+        f"Id={forventet_opgave_id!r}, navn={forventet_opgavenavn!r}.",
+        flush=True,
+    )
+    return None
+
+
+async def aabn_matchende_ubehandlet_opgave(
+    page: Page,
+    row: Locator,
+    forventet_opgave_id: str,
+    forventet_opgavenavn: str,
+    borger_url: str,
+    menu_sti: tuple[str, ...],
+    timeout: int = OPGAVE_TIMEOUT_MS,
+) -> OpstartOpgaveCheckpoint:
+    """Åbn den matchende opgave via entitet/overblik med pId og opgaveId.
+
+    Tabellen kan indeholde en ``data-url`` med ``/opgave/undock/<id>``.
+    Den URL bruges ikke til navigation, fordi KY kræver borgerens ``pId``.
+    Rækkens id, link-id og navn valideres stadig, før den korrekte URL bygges.
+    """
+
+    row_id = (await row.get_attribute("data-id") or "").strip()
+    row_name = _opstart_normaliser_tekst(await row.locator("td").nth(1).inner_text())
+    link = row.locator(KYSelectors.Borgere.UBEHANDLET_OPGAVE_LINK).first
+    link_id = (await link.get_attribute("data-opgave-id") or "").strip()
+
+    if row_id.casefold() != forventet_opgave_id.casefold():
+        raise RuntimeError("Rækkens data-id ændrede sig før åbning.")
+    if link_id.casefold() != forventet_opgave_id.casefold():
+        raise RuntimeError("Linkets data-opgave-id matcher ikke itemet.")
+    if row_name.casefold() != forventet_opgavenavn.casefold():
+        raise RuntimeError("Opgavenavnet ændrede sig før åbning.")
+
+    person_id = _hent_person_id_fra_borger_url(borger_url)
+    if not person_id:
+        raise RuntimeError(
+            "Borger-URL'en mangler et gyldigt pId. Den eksisterende opgave "
+            "kan derfor ikke åbnes sikkert."
+        )
+
+    destination_url = _byg_opgave_overblik_url(
+        borger_url=borger_url,
+        person_id=person_id,
+        opgave_id=forventet_opgave_id,
+    )
+
+    print(
+        "Åbner eksisterende opgave via korrekt entitet/overblik-URL: "
+        f"{destination_url}",
+        flush=True,
+    )
+
+    response = await page.goto(
+        destination_url,
+        wait_until="domcontentloaded",
+        timeout=timeout,
+    )
+    if response is not None and response.status >= 400:
+        raise RuntimeError(
+            "Den eksisterende opgave returnerede HTTP-fejl "
+            f"{response.status}: {destination_url}"
+        )
+
+    await _vent_paa_opgave_overblik_url(
+        page=page,
+        forventet_person_id=person_id,
+        forventet_opgave_id=forventet_opgave_id,
+        timeout=timeout,
+    )
+
+    return {
+        "opgave_id": forventet_opgave_id,
+        "opgave_navn": forventet_opgavenavn,
+        "opgave_url": page.url,
+        "borger_url": borger_url,
+        "menu_sti": menu_sti,
+        "genoptaget": True,
+        "kilde": "ubehandlede_opgaver",
+    }
+
+
+def _byg_opgave_overblik_url(
+    borger_url: str,
+    person_id: str,
+    opgave_id: str,
+) -> str:
+    """Byg KY's korrekte opgave-URL med pId og opgaveId."""
+
+    parsed = urlparse(str(borger_url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        raise RuntimeError(f"Borger-URL er ikke absolut: {borger_url!r}.")
+
+    person_id = str(person_id or "").strip()
+    opgave_id = str(opgave_id or "").strip()
+    if not person_id:
+        raise ValueError("person_id må ikke være tomt.")
+    if not opgave_id:
+        raise ValueError("opgave_id må ikke være tomt.")
+
+    query = urlencode({"pId": person_id, "opgaveId": opgave_id})
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            "/ky-fagsystem/entitet/overblik",
+            "",
+            query,
+            "",
+        )
+    )
+
+
+async def _vent_paa_opgave_overblik_url(
+    page: Page,
+    forventet_person_id: str,
+    forventet_opgave_id: str,
+    timeout: int,
+) -> None:
+    """Vent på korrekt overblik-sti og korrekte queryparametre."""
+
+    await page.wait_for_function(
+        """
+        ({ expectedPid, expectedTaskId }) => {
+            const url = new URL(window.location.href);
+
+            return (
+                url.pathname.toLowerCase().endsWith(
+                    '/ky-fagsystem/entitet/overblik'
+                )
+                && (url.searchParams.get('pId') || '').toLowerCase()
+                    === expectedPid.toLowerCase()
+                && (url.searchParams.get('opgaveId') || '').toLowerCase()
+                    === expectedTaskId.toLowerCase()
+            );
+        }
+        """,
+        arg={
+            "expectedPid": forventet_person_id,
+            "expectedTaskId": forventet_opgave_id,
+        },
+        timeout=timeout,
+    )
+
+    faktisk_person_id = _hent_query_parameter(page.url, "pId")
+    faktisk_opgave_id = _hent_query_parameter(page.url, "opgaveId")
+    if faktisk_person_id.casefold() != forventet_person_id.casefold():
+        raise RuntimeError(
+            "Den åbnede opgave-URL indeholder et forkert pId. "
+            f"Forventet={forventet_person_id!r}, faktisk={faktisk_person_id!r}."
+        )
+    if faktisk_opgave_id.casefold() != forventet_opgave_id.casefold():
+        raise RuntimeError(
+            "Den åbnede opgave-URL indeholder et forkert opgaveId. "
+            f"Forventet={forventet_opgave_id!r}, "
+            f"faktisk={faktisk_opgave_id!r}."
+        )
+
+
+def _hent_query_parameter(url: str, name: str) -> str:
+    """Returnér første værdi for en queryparameter, ellers tom tekst."""
+
+    values = parse_qs(urlparse(str(url or "").strip()).query).get(name, [])
+    return str(values[0]).strip() if values else ""
+
+
+async def _vent_paa_ubehandlede_opgaver_stabil(
+    page: Page,
+    timeout: int,
+) -> None:
+    """Vent paa at DataTables processing-indikatoren er skjult."""
+
+    await page.wait_for_function(
+        """
+        () => {
+            const table = document.querySelector('table#ubehandlede-opgaver');
+            if (!table) return false;
+            const wrapper = table.closest('.dataTables_wrapper');
+            const processing = wrapper
+                ? wrapper.querySelector('.dataTables_processing')
+                : null;
+            if (!processing) return true;
+            const style = getComputedStyle(processing);
+            return style.display === 'none'
+                || style.visibility === 'hidden'
+                || processing.getClientRects().length === 0;
+        }
+        """,
+        timeout=timeout,
+    )
+    await page.wait_for_timeout(POLL_INTERVAL_MS)
+
+
+async def _gaa_til_naeste_ubehandlede_side(
+    page: Page,
+    timeout: int,
+) -> bool:
+    """Gaa til naeste tabelside, hvis Next findes og er aktiv."""
+
+    candidates = page.locator(KYSelectors.Borgere.UBEHANDLEDE_OPGAVER_NEXT)
+    if await candidates.count() == 0:
+        return False
+
+    next_button = candidates.last
+    classes = (await next_button.get_attribute("class") or "").casefold()
+    aria_disabled = (
+        await next_button.get_attribute("aria-disabled") or "false"
+    ).casefold()
+
+    if "disabled" in classes or aria_disabled == "true":
+        return False
+    if not await next_button.is_visible():
+        return False
+
+    rows = page.locator(KYSelectors.Borgere.UBEHANDLEDE_OPGAVER_ROWS)
+    previous_first_id = ""
+    if await rows.count() > 0:
+        previous_first_id = (await rows.first.get_attribute("data-id") or "").strip()
+
+    await next_button.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
+
+    try:
+        await page.wait_for_function(
+            """
+            previousId => {
+                const first = document.querySelector(
+                    'table#ubehandlede-opgaver tbody tr[data-id]'
+                );
+                return (
+                    !first
+                    || first.getAttribute('data-id') !== previousId
+                );
+            }
+            """,
+            arg=previous_first_id,
+            timeout=timeout,
+        )
+
+    except PlaywrightTimeoutError:
+        return False
+
+    return True
+
+
+def _gem_aktivt_checkpoint_i_item_data(
+    item_data: dict[str, Any] | None,
+    checkpoint: OpstartOpgaveCheckpoint,
+) -> None:
+    """Gem genoptagelsesdata i box uden at overskrive oprindelig URL."""
+
+    if item_data is None:
+        return
+    if not isinstance(item_data, dict):
+        raise TypeError("item_data skal vaere en dictionary.")
+
+    box = item_data.get("box")
+    if not isinstance(box, dict):
+        raise TypeError("item_data['box'] skal vaere en dictionary.")
+
+    box[AKTIV_OPGAVE_ID_KEY] = checkpoint["opgave_id"]
+    box[AKTIV_OPGAVE_URL_KEY] = checkpoint["opgave_url"]
+    box[AKTIV_OPGAVE_NAVN_KEY] = checkpoint["opgave_navn"]
+
+
+def _opstart_normaliser_id(value: Any) -> str | None:
+    """Trim et opgave-id uden at aendre id-vaerdien."""
+
+    if value is None:
+        return None
+    result = str(value).strip()
+    return result or None
+
+
+def _opstart_kraev_tekst(value: str, field_name: str) -> str:
+    """Trim et obligatorisk tekstinput."""
+
+    result = _opstart_normaliser_tekst(value)
+    if not result:
+        raise ValueError(f"{field_name} maa ikke vaere tomt.")
+    return result
+
+
+def _opstart_normaliser_tekst(value: str) -> str:
+    """Saml whitespace og trim tekst."""
+
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 async def _er_opgave_loader_synlig(page: Page) -> bool:
@@ -1698,627 +2126,11 @@ async def _hent_opgavenavn_fra_header(header: Locator) -> str:
 
     raise RuntimeError("Opgavenavnet kunne ikke læses fra opgaveheaderen.")
 
-
 def _normaliser_tekst(value: str) -> str:
-    """Saml whitespace og trim tekst."""
-
-    return re.sub(r"\s+", " ", value).strip()
-
-"""Indsæt dette afsnit nederst i ky_client/functionality/borgere.py.
-
-Forudsætter, at borgere.py allerede importerer:
-
-    import re
-    from playwright.async_api import Locator, Page
-    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-
-og allerede indeholder:
-
-    aabn_opgave_og_hent_url(...)
-    ACTION_TIMEOUT_MS
-    OPGAVE_TIMEOUT_MS
-    POLL_INTERVAL_MS
-"""
-
-
-async def opret_opfoelgningsopgave(
-    page: Page,
-    opfoelgningstype: str,
-    opfoelgningsdato: str,
-    sagsbehandler: str,
-    titel: str | None = None,
-    frekvens: str | None = None,
-    haendelsestype: str | None = None,
-    beskrivelse: str | None = None,
-    vaelg_sagsbehandler_fra_typeahead: bool = False,
-    test: bool = False,
-    timeout: int = OPGAVE_TIMEOUT_MS,
-) -> OpgaveCheckpoint:
-    """Åbn, udfyld og gem en opfølgningsopgave på den aktive borger.
-
-    Borgeren skal være fremsøgt og aktiv, før funktionen kaldes. Brug fx
-    ``await naviger_til_borger(...)`` først.
-
-    Args:
-        page:
-            Aktiv asynkron Playwright-side i KY.
-        opfoelgningstype:
-            Synlig label eller option-værdi i ``select#opfoelgningsType``.
-            Eksempel: ``Brugerdefineret`` eller ``manuel``.
-        opfoelgningsdato:
-            Dato til ``input#command.opfoelgningsdato``.
-            Eksempel: ``01-09-2026``.
-        sagsbehandler:
-            Tekst til ``input#typeahead``.
-        titel:
-            Titel til den brugerdefinerede opfølgningsopgave. Påkrævet,
-            hvis den valgte opfølgningstype er Brugerdefineret.
-        frekvens:
-            Synlig label eller option-værdi i ``select#frekvens``.
-            Påkrævet ved Brugerdefineret.
-        haendelsestype:
-            Synlig label eller option-værdi i ``select#haendelseType``.
-            Valgfri.
-        beskrivelse:
-            Tekst til beskrivelsesfeltet. Påkrævet ved Brugerdefineret.
-        vaelg_sagsbehandler_fra_typeahead:
-            Hvis True, vælges et matchende typeahead-resultat. Hvis False,
-            indsættes teksten uden valg af et forslag.
-        test:
-            Hvis True, udfyldes og valideres alle felter, men der klikkes
-            ikke på Gem. Funktionen returnerer stadig opgavecheckpointet,
-            så den udfyldte formular kan inspiceres i browseren.
-        timeout:
-            Maksimal ventetid i millisekunder.
-
-    Returns:
-        Opgavecheckpointet fra ``aabn_opgave_og_hent_url``.
-
-    Raises:
-        ValueError:
-            Hvis obligatoriske input mangler eller en dropdownværdi ikke
-            findes.
-        RuntimeError:
-            Hvis formularen ikke kan udfyldes eller gemmes.
-        PlaywrightTimeoutError:
-            Hvis et nødvendigt element ikke bliver tilgængeligt.
-    """
-
-    if page.is_closed():
-        raise RuntimeError(
-            "KY-siden er lukket. Opfølgningsopgaven kan ikke oprettes."
-        )
-
-    opfoelgningstype = _normaliser_paakraevet_input(
-        opfoelgningstype,
-        "opfoelgningstype",
-    )
-    opfoelgningsdato = _normaliser_paakraevet_input(
-        opfoelgningsdato,
-        "opfoelgningsdato",
-    )
-    sagsbehandler = _normaliser_paakraevet_input(
-        sagsbehandler,
-        "sagsbehandler",
-    )
-    titel = _normaliser_valgfrit_input(titel)
-    frekvens = _normaliser_valgfrit_input(frekvens)
-    haendelsestype = _normaliser_valgfrit_input(haendelsestype)
-    beskrivelse = _normaliser_valgfrit_input(beskrivelse)
-
-    print()
-    print("=" * 70)
-    print("OPRETTER OPFØLGNINGSOPGAVE")
-    print(f"Opfølgningstype: {opfoelgningstype!r}")
-    print(f"Opfølgningsdato: {opfoelgningsdato!r}")
-    print(f"Sagsbehandler: {sagsbehandler!r}")
-    print(f"Titel: {titel!r}")
-    print(f"Frekvens: {frekvens!r}")
-    print(f"Hændelsestype: {haendelsestype!r}")
-    print(f"Beskrivelse: {beskrivelse!r}")
-    print(f"test: {test}")
-    print("=" * 70)
-
-    checkpoint = await aabn_opgave_og_hent_url(
-        page=page,
-        menu_sti=("Administration", "Opret opfølgningsopgave"),
-        timeout=timeout,
-    )
-
-    await _vent_paa_tom_opgaveloader(
-        page=page,
-        timeout=timeout,
-    )
-
-    await _vaelg_option_via_value_eller_label(
-        page=page,
-        selector="select#opfoelgningsType",
-        option=opfoelgningstype,
-        timeout=timeout,
-    )
-
-    # KY kan genopbygge formularen efter skift af opfølgningstype.
-    await page.wait_for_timeout(1_000)
-    await _vent_paa_tom_opgaveloader(page=page, timeout=timeout)
-
-    await _udfyld_synligt_felt(
-        page=page,
-        selector="input#command\\.opfoelgningsdato",
-        value=opfoelgningsdato,
-        feltnavn="Opfølgningsdato",
-        timeout=timeout,
-    )
-
-    await _udfyld_sagsbehandler(
-        page=page,
-        sagsbehandler=sagsbehandler,
-        vaelg_forslag=vaelg_sagsbehandler_fra_typeahead,
-        timeout=timeout,
-    )
-
-    is_brugerdefineret = await _er_valgt_opfoelgningstype_brugerdefineret(
-        page=page,
-        timeout=timeout,
-    )
-
-    if is_brugerdefineret:
-        if not titel:
-            raise ValueError(
-                "titel er påkrævet ved opfølgningstypen Brugerdefineret."
-            )
-        if not frekvens:
-            raise ValueError(
-                "frekvens er påkrævet ved opfølgningstypen Brugerdefineret."
-            )
-        if not beskrivelse:
-            raise ValueError(
-                "beskrivelse er påkrævet ved opfølgningstypen "
-                "Brugerdefineret."
-            )
-
-        # Dropdowns udfyldes før tekstfelter, da KY kan genopbygge DOM'en.
-        await _vaelg_option_via_value_eller_label(
-            page=page,
-            selector="select#frekvens",
-            option=frekvens,
-            timeout=timeout,
-        )
-
-        if haendelsestype:
-            await _vaelg_option_via_value_eller_label(
-                page=page,
-                selector="select#haendelseType",
-                option=haendelsestype,
-                timeout=timeout,
-            )
-
-        await page.wait_for_timeout(1_500)
-        await _vent_paa_tom_opgaveloader(page=page, timeout=timeout)
-
-        await _udfyld_synligt_felt(
-            page=page,
-            selector="input[name='title']",
-            value=titel,
-            feltnavn="Titel",
-            timeout=timeout,
-        )
-        await _udfyld_synligt_felt(
-            page=page,
-            selector="textarea[name='beskrivelse']",
-            value=beskrivelse,
-            feltnavn="Beskrivelse",
-            timeout=timeout,
-        )
-
-        # Kontrollér, at en efterfølgende DOM-opdatering ikke nulstillede dem.
-        await page.wait_for_timeout(750)
-        await _kontroller_synligt_felt(
-            page=page,
-            selector="input[name='title']",
-            forventet=titel,
-            feltnavn="Titel",
-            timeout=timeout,
-        )
-        await _kontroller_synligt_felt(
-            page=page,
-            selector="textarea[name='beskrivelse']",
-            forventet=beskrivelse,
-            feltnavn="Beskrivelse",
-            timeout=timeout,
-        )
-    elif any(
-        value is not None
-        for value in (titel, frekvens, haendelsestype, beskrivelse)
-    ):
-        raise ValueError(
-            "titel, frekvens, haendelsestype og beskrivelse må kun "
-            "angives, når opfølgningstypen er Brugerdefineret."
-        )
-
-    if test:
-        print()
-        print("=" * 70)
-        print("test-TILSTAND: FORMULAREN ER UDFYLDT")
-        print("Der klikkes ikke på Gem.")
-        print(f"Opgavenavn: {checkpoint['opgave_navn']}")
-        print(f"Opgave-id: {checkpoint['opgave_id']}")
-        print("=" * 70)
-        return checkpoint
-
-    gem = await _find_synlig_aktiv_knap(
-        page=page,
-        text="Gem",
-        timeout=timeout,
-    )
-    await gem.scroll_into_view_if_needed()
-    await gem.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
-    await _vent_paa_tom_opgaveloader(page=page, timeout=timeout)
-
-    try:
-        await gem.wait_for(
-            state="hidden",
-            timeout=min(30_000, timeout),
-        )
-    except PlaywrightTimeoutError as error:
-        validation = await _hent_synlig_validering(page)
-        raise RuntimeError(
-            "Opfølgningsopgaven blev ikke gemt. "
-            f"Synlig validering: {validation or 'ukendt fejl'}"
-        ) from error
-
-    print()
-    print("=" * 70)
-    print("OPFØLGNINGSOPGAVEN ER GEMT")
-    print(f"Opgavenavn: {checkpoint['opgave_navn']}")
-    print(f"Opgave-id: {checkpoint['opgave_id']}")
-    print("=" * 70)
-
-    return checkpoint
-
-
-async def _vent_paa_tom_opgaveloader(
-    page: Page,
-    timeout: int,
-) -> None:
-    """Vent på, at #empty_opgave_loader er skjult eller fjernet."""
-
-    await page.wait_for_function(
-        """
-        () => {
-            const loader = document.querySelector('#empty_opgave_loader');
-            if (!loader) return true;
-
-            const style = window.getComputedStyle(loader);
-            return (
-                style.display === 'none'
-                || style.visibility === 'hidden'
-                || style.opacity === '0'
-                || loader.offsetParent === null
-            );
-        }
-        """,
-        timeout=timeout,
-    )
-
-
-async def _vaelg_option_via_value_eller_label(
-    page: Page,
-    selector: str,
-    option: str,
-    timeout: int,
-) -> str:
-    """Vælg en option via eksakt value eller synlig label."""
-
-    select = page.locator(f"{selector}:visible").last
-    await select.wait_for(state="attached", timeout=timeout)
-
-    options = select.locator("option")
-    selected_value: str | None = None
-    available: list[str] = []
-
-    for index in range(await options.count()):
-        current = options.nth(index)
-        value = (await current.get_attribute("value") or "").strip()
-        label = re.sub(
-            r"\s+",
-            " ",
-            await current.inner_text(),
-        ).strip()
-        available.append(f"{label} ({value})")
-
-        if (
-            value.casefold() == option.casefold()
-            or label.casefold() == option.casefold()
-        ):
-            selected_value = value
-            break
-
-    if selected_value is None:
-        raise ValueError(
-            f"Kunne ikke finde {option!r} i {selector}. "
-            f"Muligheder: {available}"
-        )
-
-    await select.select_option(value=selected_value)
-    await select.dispatch_event("input")
-    await select.dispatch_event("change")
-
-    # Understøt bootstrap-select, hvis KY bruger plugin-visningen.
-    await page.evaluate(
-        """
-        ({ selector, value }) => {
-            const elements = Array.from(document.querySelectorAll(selector));
-            const element = elements.find(item => {
-                const style = window.getComputedStyle(item);
-                return style.display !== 'none'
-                    && style.visibility !== 'hidden';
-            }) || elements[elements.length - 1];
-
-            const jq = window.jQuery || window.$;
-            if (
-                element
-                && jq
-                && typeof jq(element).selectpicker === 'function'
-            ) {
-                jq(element).selectpicker('val', value);
-                jq(element).trigger('changed.bs.select');
-                jq(element).trigger('change');
-            }
-        }
-        """,
-        {"selector": selector, "value": selected_value},
-    )
-
-    return selected_value
-
-
-async def _udfyld_synligt_felt(
-    page: Page,
-    selector: str,
-    value: str,
-    feltnavn: str,
-    timeout: int,
-) -> None:
-    """Udfyld den seneste synlige input- eller textarea-instans robust."""
-
-    fields = page.locator(f"{selector}:visible")
-    if await fields.count() == 0:
-        raise RuntimeError(
-            f"Kunne ikke finde et synligt felt til {feltnavn}. "
-            f"Selector={selector!r}."
-        )
-
-    field = fields.last
-    await field.wait_for(state="visible", timeout=timeout)
-    await field.scroll_into_view_if_needed()
-    await field.fill(value)
-    await field.dispatch_event("input")
-    await field.dispatch_event("change")
-
-    actual_value = await field.input_value()
-
-    if actual_value.strip() != value.strip():
-        # Fallback til browserens native value-setter.
-        await field.evaluate(
-            """
-            (element, newValue) => {
-                const prototype = element instanceof HTMLTextAreaElement
-                    ? HTMLTextAreaElement.prototype
-                    : HTMLInputElement.prototype;
-                const descriptor = Object.getOwnPropertyDescriptor(
-                    prototype,
-                    'value'
-                );
-                if (!descriptor || !descriptor.set) {
-                    throw new Error('Native value-setter blev ikke fundet');
-                }
-                descriptor.set.call(element, newValue);
-                element.dispatchEvent(new Event('input', { bubbles: true }));
-                element.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-            """,
-            value,
-        )
-        actual_value = await field.input_value()
-
-    if actual_value.strip() != value.strip():
-        raise RuntimeError(
-            f"{feltnavn} kunne ikke udfyldes. "
-            f"Forventet={value!r}, faktisk={actual_value!r}."
-        )
-
-
-async def _kontroller_synligt_felt(
-    page: Page,
-    selector: str,
-    forventet: str,
-    feltnavn: str,
-    timeout: int,
-) -> None:
-    """Kontrollér værdien i den seneste synlige feltinstans."""
-
-    fields = page.locator(f"{selector}:visible")
-    if await fields.count() == 0:
-        raise RuntimeError(
-            f"{feltnavn} forsvandt fra formularen. Selector={selector!r}."
-        )
-
-    field = fields.last
-    await field.wait_for(state="visible", timeout=timeout)
-    faktisk = await field.input_value()
-
-    if faktisk.strip() != forventet.strip():
-        raise RuntimeError(
-            f"{feltnavn} blev nulstillet før Gem. "
-            f"Forventet={forventet!r}, faktisk={faktisk!r}."
-        )
-
-
-async def _udfyld_sagsbehandler(
-    page: Page,
-    sagsbehandler: str,
-    vaelg_forslag: bool,
-    timeout: int,
-) -> None:
-    """Indsæt sagsbehandlertekst og vælg valgfrit et typeahead-resultat."""
-
-    fields = page.locator("input#typeahead:visible")
-    if await fields.count() == 0:
-        raise RuntimeError("Et synligt sagsbehandlerfelt blev ikke fundet.")
-
-    field = fields.last
-    await field.wait_for(state="visible", timeout=timeout)
-    await field.fill(sagsbehandler)
-    await field.dispatch_event("input")
-    await field.dispatch_event("change")
-
-    if not vaelg_forslag:
-        faktisk = await field.input_value()
-        if faktisk.strip() != sagsbehandler.strip():
-            raise RuntimeError(
-                "Sagsbehandlerteksten blev ikke indsat korrekt. "
-                f"Forventet={sagsbehandler!r}, faktisk={faktisk!r}."
-            )
-        return
-
-    pattern = re.compile(
-        rf"^\s*{re.escape(sagsbehandler)}(?:\s|\().*$",
-        re.IGNORECASE,
-    )
-    elapsed_ms = 0
-
-    while elapsed_ms < timeout:
-        suggestions = page.locator(
-            ".tt-menu:visible .tt-suggestion.tt-selectable"
-        )
-        for index in range(await suggestions.count()):
-            suggestion = suggestions.nth(index)
-            try:
-                if not await suggestion.is_visible():
-                    continue
-                text = re.sub(
-                    r"\s+",
-                    " ",
-                    await suggestion.inner_text(),
-                ).strip()
-                if pattern.match(text):
-                    await suggestion.click(
-                        timeout=min(ACTION_TIMEOUT_MS, timeout)
-                    )
-                    return
-            except Exception:
-                continue
-
-        await page.wait_for_timeout(POLL_INTERVAL_MS)
-        elapsed_ms += POLL_INTERVAL_MS
-
-    raise PlaywrightTimeoutError(
-        "Sagsbehandleren blev ikke fundet i typeahead-listen: "
-        f"{sagsbehandler}."
-    )
-
-
-async def _er_valgt_opfoelgningstype_brugerdefineret(
-    page: Page,
-    timeout: int,
-) -> bool:
-    """Kontrollér den valgte opfølgningstype."""
-
-    selected = page.locator(
-        "select#opfoelgningsType:visible option:checked"
-    ).last
-    await selected.wait_for(state="attached", timeout=timeout)
-
-    value = (await selected.get_attribute("value") or "").strip().casefold()
-    label = (await selected.inner_text()).strip().casefold()
-
-    return value == "manuel" or label == "brugerdefineret"
-
-
-async def _find_synlig_aktiv_knap(
-    page: Page,
-    text: str,
-    timeout: int,
-) -> Locator:
-    """Find en synlig og aktiv submitknap med eksakt tekst."""
-
-    pattern = re.compile(rf"^\s*{re.escape(text)}\s*$", re.IGNORECASE)
-    elapsed_ms = 0
-
-    while elapsed_ms < timeout:
-        candidates = page.locator(
-            "button[type='submit'], input[type='submit'], "
-            "button.btn-submit-form, a.btn-submit-form"
-        )
-
-        for index in range(await candidates.count()):
-            candidate = candidates.nth(index)
-            try:
-                if not await candidate.is_visible():
-                    continue
-                if not await candidate.is_enabled():
-                    continue
-
-                value = await candidate.get_attribute("value")
-                visible_text = value or await candidate.inner_text()
-                visible_text = re.sub(
-                    r"\s+",
-                    " ",
-                    visible_text or "",
-                ).strip()
-
-                if pattern.fullmatch(visible_text):
-                    return candidate
-            except Exception:
-                continue
-
-        await page.wait_for_timeout(POLL_INTERVAL_MS)
-        elapsed_ms += POLL_INTERVAL_MS
-
-    raise PlaywrightTimeoutError(
-        f"Knappen {text!r} blev ikke fundet inden for "
-        f"{timeout / 1000:.0f} sekunder."
-    )
-
-
-async def _hent_synlig_validering(page: Page) -> str:
-    """Returnér synlige valideringsbeskeder fra formularen."""
-
-    messages = page.locator(
-        ".has-error:visible, .help-block:visible, "
-        ".alert-danger:visible, .field-validation-error:visible"
-    )
-    values: list[str] = []
-
-    for index in range(await messages.count()):
-        try:
-            text = re.sub(
-                r"\s+",
-                " ",
-                await messages.nth(index).inner_text(),
-            ).strip()
-        except Exception:
-            continue
-
-        if text and text not in values:
-            values.append(text)
-
-    return " | ".join(values)
-
-
-def _normaliser_paakraevet_input(value: str, feltnavn: str) -> str:
-    """Trim et obligatorisk input og afvis tomme værdier."""
-
-    normaliseret = str(value or "").strip()
-    if not normaliseret:
-        raise ValueError(f"{feltnavn} må ikke være tom.")
-    return normaliseret
-
-
-def _normaliser_valgfrit_input(value: str | None) -> str | None:
-    """Trim et valgfrit input og returnér None for tom tekst."""
-
-    if value is None:
-        return None
-    normaliseret = str(value).strip()
-    return normaliseret or None
+    """Saml whitespace og fjern mellemrum før og efter teksten."""
+
+    return re.sub(
+        r"\s+",
+        " ",
+        str(value or ""),
+    ).strip()

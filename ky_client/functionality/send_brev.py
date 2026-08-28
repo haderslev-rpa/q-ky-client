@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import TypedDict
+from typing import Any, TypedDict
+
+from ky_client.functionality.borgere import OpstartOpgaveCheckpoint
 
 from playwright.async_api import Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -19,6 +21,7 @@ from ..selectors import KYSelectors
 ACTION_TIMEOUT_MS = 30_000
 OPGAVE_TIMEOUT_MS = 120_000
 POLL_INTERVAL_MS = 250
+SEND_BREV_MENU_STI = ("Administration", "Send brev")
 
 
 class ValgtSagInfo(TypedDict):
@@ -32,6 +35,98 @@ class ValgtStandardBilagInfo(TypedDict):
     titel: str
     noegle: str
 
+
+class SendBrevResultat(TypedDict):
+    """Resultat fra udfyldning af en allerede åbnet Send brev-opgave."""
+    opgave_id: str
+    opgave_navn: str
+    opgave_url: str
+    borger_url: str
+    menu_sti: tuple[str, ...]
+    sag_id: str
+    sagstekst: str
+    brevskabelon: str
+    bilag_titel: str
+    bilag_noegle: str
+    fysisk_post: bool
+    genoptaget: bool
+    kilde: str
+    test: bool
+    sendt: bool
+
+
+async def send_brev(
+    page: Page,
+    checkpoint: OpstartOpgaveCheckpoint,
+    sag: str,
+    skabelon_sti: Sequence[str],
+    bilag_titel: str | None = None,
+    fysisk_post: bool = False,
+    aktive: bool = True,
+    passive: bool = True,
+    test: bool = True,
+    timeout: int = OPGAVE_TIMEOUT_MS,
+) -> SendBrevResultat:
+    """Overtag og udfyld Send brev-opgaven fra opstart_opgave.
+
+    Funktionen åbner, genoptager eller opretter aldrig selv en opgave.
+    ``checkpoint`` skal være resultatet fra den fælles ``opstart_opgave``.
+    Ved ``test=True`` klikkes der ikke på Godkend, og brevet sendes ikke.
+    """
+    _valider_send_brev_checkpoint(checkpoint)
+    valgt_sag = await vaelg_sag_til_brev(
+        page=page,
+        soegevaerdi=sag,
+        aktive=aktive,
+        passive=passive,
+        timeout=timeout,
+    )
+    brevskabelon = await vaelg_brevskabelon_fra_sti(
+        page=page,
+        skabelon_sti=skabelon_sti,
+        timeout=timeout,
+    )
+    bilag = {"titel": "", "noegle": ""}
+    if bilag_titel:
+        bilag = await vaelg_standard_bilag(
+            page=page,
+            bilag_titel=bilag_titel,
+            timeout=timeout,
+        )
+        await vent_efter_bilag_dropdown_er_minimeret(page=page, timeout=timeout)
+    await saet_fysisk_post(page=page, fysisk_post=fysisk_post, timeout=timeout)
+    sendt = await godkend_og_send_brev(page=page, test=test, timeout=timeout)
+    return {
+        "opgave_id": checkpoint["opgave_id"],
+        "opgave_navn": checkpoint["opgave_navn"],
+        "opgave_url": checkpoint["opgave_url"],
+        "borger_url": checkpoint["borger_url"],
+        "menu_sti": checkpoint["menu_sti"],
+        "sag_id": valgt_sag["sag_id"],
+        "sagstekst": valgt_sag["sagstekst"],
+        "brevskabelon": brevskabelon,
+        "bilag_titel": bilag["titel"],
+        "bilag_noegle": bilag["noegle"],
+        "fysisk_post": fysisk_post,
+        "genoptaget": bool(checkpoint.get("genoptaget", False)),
+        "kilde": str(checkpoint.get("kilde", "ny_opgave")),
+        "test": test,
+        "sendt": sendt,
+    }
+
+
+def _valider_send_brev_checkpoint(checkpoint: OpstartOpgaveCheckpoint) -> None:
+    """Kræv checkpoint fra opstart_opgave til Send brev."""
+    if not isinstance(checkpoint, dict):
+        raise TypeError("checkpoint skal komme fra opstart_opgave().")
+    for key in ("opgave_id", "opgave_navn", "opgave_url", "borger_url", "menu_sti"):
+        if not checkpoint.get(key):
+            raise RuntimeError(f"Checkpointet mangler {key}.")
+    if str(checkpoint["opgave_navn"]).casefold() != "Send brev".casefold():
+        raise RuntimeError(
+            "Checkpointet tilhører ikke Send brev. "
+            f"Faktisk opgavenavn={checkpoint['opgave_navn']!r}."
+        )
 
 
 async def vaelg_sag_til_brev(
@@ -48,37 +143,25 @@ async def vaelg_sag_til_brev(
     if not sags_id_input:
         raise ValueError("soegevaerdi/SagsID må ikke være tomt.")
 
-    root = page.locator(
-        f"{KYSelectors.Borgere.SEND_BREV_SAGSVAELGER}:visible"
-    ).first
+    root = page.locator(f"{KYSelectors.Borgere.SEND_BREV_SAGSVAELGER}:visible").first
     await root.wait_for(state="visible", timeout=timeout)
 
-    toggle = root.locator(
-        KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_TOGGLE
-    ).first
+    toggle = root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_TOGGLE).first
     await toggle.click(timeout=ACTION_TIMEOUT_MS)
 
-    menu = root.locator(
-        KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_MENU
-    ).first
+    menu = root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_MENU).first
     await menu.wait_for(state="visible", timeout=timeout)
 
     await _set_checkbox(
-        root.locator(
-            KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_AKTIVE
-        ).first,
+        root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_AKTIVE).first,
         aktive,
     )
     await _set_checkbox(
-        root.locator(
-            KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_PASSIVE
-        ).first,
+        root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_PASSIVE).first,
         passive,
     )
 
-    search = root.locator(
-        KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_SOEG
-    ).first
+    search = root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_SOEG).first
     await search.wait_for(state="visible", timeout=timeout)
     await search.fill(sags_id_input)
     await search.dispatch_event("input")
@@ -137,8 +220,7 @@ async def vaelg_brevskabelon(
 
     candidate = await _find_unique_template(page, skabelon_titel, timeout)
     selected_title = _normaliser(
-        await candidate.get_attribute("data-titel")
-        or await candidate.inner_text()
+        await candidate.get_attribute("data-titel") or await candidate.inner_text()
     )
     await candidate.click(timeout=ACTION_TIMEOUT_MS)
     await _wait_for_input_value(field, selected_title, timeout)
@@ -158,9 +240,7 @@ async def vaelg_brevskabelon_fra_sti(
     """
 
     sti = tuple(
-        _normaliser(delnavn)
-        for delnavn in skabelon_sti
-        if _normaliser(delnavn)
+        _normaliser(delnavn) for delnavn in skabelon_sti if _normaliser(delnavn)
     )
     if len(sti) < 2:
         raise ValueError(
@@ -202,8 +282,7 @@ async def vaelg_standard_bilag(
 
     menu = await _vent_paa_standard_bilag_dropdown(page, timeout)
     search = menu.locator(
-        "input.skabelonvaelger-soeg"
-        "[placeholder='Søg efter vedhæftning']"
+        "input.skabelonvaelger-soeg[placeholder='Søg efter vedhæftning']"
     ).first
     await search.wait_for(state="visible", timeout=timeout)
     await search.fill(bilag_titel)
@@ -216,19 +295,15 @@ async def vaelg_standard_bilag(
         timeout,
     )
     selected_title = _normaliser(
-        await bilag.get_attribute("data-titel")
-        or await bilag.inner_text()
+        await bilag.get_attribute("data-titel") or await bilag.inner_text()
     )
     selected_key = (await bilag.get_attribute("data-noegle") or "").strip()
     if not selected_key:
-        raise RuntimeError(
-            f"Standardbilaget '{selected_title}' mangler data-noegle."
-        )
+        raise RuntimeError(f"Standardbilaget '{selected_title}' mangler data-noegle.")
 
     # Genfind lige før klik, fordi KY kan udskifte li-elementet ved filtrering.
     bilag = menu.locator(
-        "li.hg-skabelon.cell.VEDHAEFTNING"
-        f"[data-noegle='{selected_key}']:visible"
+        f"li.hg-skabelon.cell.VEDHAEFTNING[data-noegle='{selected_key}']:visible"
     ).last
     await bilag.wait_for(state="visible", timeout=timeout)
     await bilag.click(timeout=ACTION_TIMEOUT_MS)
@@ -260,9 +335,7 @@ async def vent_efter_bilag_dropdown_er_minimeret(
 
     while elapsed < timeout:
         if page.is_closed():
-            raise RuntimeError(
-                "KY-siden blev lukket under vent på bilagsdropdownen."
-            )
+            raise RuntimeError("KY-siden blev lukket under vent på bilagsdropdownen.")
 
         snapshot = await page.evaluate(
             r"""
@@ -429,9 +502,7 @@ async def _vent_paa_fysisk_post_javascript_tilstand(
 
     while elapsed < timeout:
         if page.is_closed():
-            raise RuntimeError(
-                "KY-siden blev lukket under validering af fysisk post."
-            )
+            raise RuntimeError("KY-siden blev lukket under validering af fysisk post.")
 
         snapshot = await page.evaluate(
             r"""
@@ -517,6 +588,8 @@ async def _vent_paa_fysisk_post_javascript_tilstand(
         "JavaScript gav ikke den ønskede fysiske post-tilstand. "
         f"Forventet={fysisk_post}, seneste snapshot={last_snapshot!r}."
     )
+
+
 async def godkend_og_send_brev(
     page: Page,
     test: bool = True,
@@ -635,9 +708,7 @@ async def _find_sag_med_eksakt_sagsid(
     wanted = sags_id.casefold()
     elapsed = 0
     while elapsed < timeout:
-        rows = root.locator(
-            KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_RAEKKER
-        )
+        rows = root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_RAEKKER)
         matches: list[Locator] = []
         for index in range(await rows.count()):
             row = rows.nth(index)
@@ -667,9 +738,7 @@ async def _dobbeltklik_paa_sagsraekke(
 ) -> None:
     await row.wait_for(state="visible", timeout=timeout)
     await row.scroll_into_view_if_needed()
-    cells = row.locator(
-        "td:not(.CUSTOM_HTML):not(.select-row):not(.handlinger)"
-    )
+    cells = row.locator("td:not(.CUSTOM_HTML):not(.select-row):not(.handlinger)")
     if await cells.count() == 0:
         raise RuntimeError("Sagsrækken har ingen klikbare dataceller.")
     first_box = await cells.first.bounding_box()
@@ -696,19 +765,14 @@ async def _vent_paa_sagsvalg_registreret(
     sag_id: str,
     timeout: int,
 ) -> None:
-    display = root.locator(
-        KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_INPUT
-    ).first
-    menu = root.locator(
-        KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_MENU
-    ).first
+    display = root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_INPUT).first
+    menu = root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_MENU).first
     elapsed = 0
     while elapsed < timeout:
         try:
             value = _normaliser(await display.input_value())
             chosen = root.locator(
-                "input[type='hidden']"
-                f"[value='{sag_id}'][data-chosen='true']"
+                f"input[type='hidden'][value='{sag_id}'][data-chosen='true']"
             )
             if (
                 await chosen.count() > 0
@@ -731,9 +795,7 @@ async def _find_unique_template(
     wanted = title.casefold()
     elapsed = 0
     while elapsed < timeout:
-        candidates = page.locator(
-            KYSelectors.Borgere.SEND_BREV_BREVSKABELON_TITLER
-        )
+        candidates = page.locator(KYSelectors.Borgere.SEND_BREV_BREVSKABELON_TITLER)
         matches: list[Locator] = []
         for index in range(await candidates.count()):
             candidate = candidates.nth(index)
@@ -809,14 +871,10 @@ async def _vent_paa_standard_bilag_resultat(
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise RuntimeError(
-                f"Flere standardbilag har titlen '{bilag_titel}'."
-            )
+            raise RuntimeError(f"Flere standardbilag har titlen '{bilag_titel}'.")
         await menu.page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed += POLL_INTERVAL_MS
-    raise PlaywrightTimeoutError(
-        f"Standardbilaget '{bilag_titel}' blev ikke fundet."
-    )
+    raise PlaywrightTimeoutError(f"Standardbilaget '{bilag_titel}' blev ikke fundet.")
 
 
 async def _find_tilfoej_bilag_i_samme_raekke(
@@ -828,17 +886,14 @@ async def _find_tilfoej_bilag_i_samme_raekke(
     row = field.locator("xpath=ancestor::tr[1]")
     await row.wait_for(state="visible", timeout=timeout)
     pattern = re.compile(r"^\s*Tilføj bilag\s*$", re.IGNORECASE)
-    controls = row.locator(
-        "a:visible, button:visible, input[type='button']:visible"
-    )
+    controls = row.locator("a:visible, button:visible, input[type='button']:visible")
     matches: list[Locator] = []
     for index in range(await controls.count()):
         control = controls.nth(index)
         if not await control.is_enabled():
             continue
         text = _normaliser(
-            await control.get_attribute("value")
-            or await control.inner_text()
+            await control.get_attribute("value") or await control.inner_text()
         )
         if pattern.fullmatch(text):
             matches.append(control)
@@ -904,3 +959,4 @@ async def _set_checkbox(locator: Locator, checked: bool) -> None:
 
 def _normaliser(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+

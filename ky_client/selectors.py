@@ -33,16 +33,13 @@ class KYSelectors:
         LIVSSITUATION = "table#person-overblik-livssituation"
         LÅST_BANNER = 'div[data-textkey="system.type.advarsel_item.reserveret_af"]'
 
-
         # Send brev - opgaveheader og loader
         SEND_BREV_HEADER = (
             "div#opgave-header.block-heading "
             "span[data-textkey='system.type.opgave.send_brev']"
         )
         SEND_BREV_HEADER_CONTAINER = "div#opgave-header.block-heading"
-        SEND_BREV_UNDOCK_BUTTON = (
-            "a.undock_panel_button[data-opgave-id][data-url]"
-        )
+        SEND_BREV_UNDOCK_BUTTON = "a.undock_panel_button[data-opgave-id][data-url]"
         SEND_BREV_LOADER = (
             "div#empty_opgave_loader, "
             "div#opgave_loader, "
@@ -52,35 +49,21 @@ class KYSelectors:
 
         # Send brev - Vælg sag
         SEND_BREV_SAGSVAELGER = (
-            "div.sagsvaelger.dropdown"
-            "[data-id='command.alleTilfoejedeBreve[0].sagIds']"
+            "div.sagsvaelger.dropdown[data-id='command.alleTilfoejedeBreve[0].sagIds']"
         )
-        SEND_BREV_SAGSVAELGER_TOGGLE = (
-            "div.dropdown-toggle[data-toggle='dropdown']"
-        )
-        SEND_BREV_SAGSVAELGER_INPUT = (
-            "input.sagsvaelger-input[readonly]"
-        )
-        SEND_BREV_SAGSVAELGER_MENU = (
-            "div.sagsvaelger-list.dropdown-menu"
-        )
+        SEND_BREV_SAGSVAELGER_TOGGLE = "div.dropdown-toggle[data-toggle='dropdown']"
+        SEND_BREV_SAGSVAELGER_INPUT = "input.sagsvaelger-input[readonly]"
+        SEND_BREV_SAGSVAELGER_MENU = "div.sagsvaelger-list.dropdown-menu"
         SEND_BREV_SAGSVAELGER_SOEG = "input.sagsvaelger-soeg"
-        SEND_BREV_SAGSVAELGER_AKTIVE = (
-            "input[type='checkbox'][data-tilstand='aktiv']"
-        )
-        SEND_BREV_SAGSVAELGER_PASSIVE = (
-            "input[type='checkbox'][data-tilstand='passiv']"
-        )
+        SEND_BREV_SAGSVAELGER_AKTIVE = "input[type='checkbox'][data-tilstand='aktiv']"
+        SEND_BREV_SAGSVAELGER_PASSIVE = "input[type='checkbox'][data-tilstand='passiv']"
         SEND_BREV_SAGSVAELGER_RESULTS = "div.sagsvaelger-results"
         SEND_BREV_SAGSVAELGER_SELECT_CELL = "td.select-row"
 
-        SEND_BREV_SAGSVAELGER_TABEL = (
-            "table[id^='brevSagsvaelgerTable']"
-        )
+        SEND_BREV_SAGSVAELGER_TABEL = "table[id^='brevSagsvaelgerTable']"
 
         SEND_BREV_SAGSVAELGER_RAEKKER = (
-            "table[id^='brevSagsvaelgerTable'] "
-            "> tbody > tr.table-row"
+            "table[id^='brevSagsvaelgerTable'] > tbody > tr.table-row"
         )
 
         # Send brev - Brevskabelon
@@ -89,9 +72,7 @@ class KYSelectors:
             "[name='alleTilfoejedeBreve[0].skabelonTitel']"
             "[readonly]"
         )
-        SEND_BREV_BREVSKABELON_SOEG = (
-            "input[placeholder='Søg efter skabelon']"
-        )
+        SEND_BREV_BREVSKABELON_SOEG = "input[placeholder='Søg efter skabelon']"
         SEND_BREV_BREVSKABELON_TITLER = (
             "ul.skabelonlist li[data-titel], "
             "ul.skabelonlist li:not(:has(ul)), "
@@ -99,7 +80,6 @@ class KYSelectors:
             "[role='option'], "
             ".skabelonvaelger li:not(:has(ul))"
         )
-
 
         # Send brev - Standard bilag
         # VIGTIGT: Selectoren må kun matche readonly-inputs til en
@@ -119,8 +99,6 @@ class KYSelectors:
             "li.hg-skabelon.cell.VEDHAEFTNING[data-titel][data-noegle]"
         )
 
-
-
         # Send brev - fysisk post, bilagsdropdown og Brevtype
         SEND_BREV_FYSISK_POST = (
             "input[type='checkbox'].fysisk_post"
@@ -128,46 +106,80 @@ class KYSelectors:
         )
         SEND_BREV_FYSISK_POST_JS = "input[type='checkbox'].fysisk_post"
         SEND_BREV_FYSISK_POST_NAME = "alleTilfoejedeBreve[0].fysiskPost"
-        SEND_BREV_POSTAGE_CONTAINER = (
-            "tr#postage-container0[name='postage-container']"
-        )
-        SEND_BREV_POSTAGE_TYPE = (
-            "select[name='alleTilfoejedeBreve[0].postage']"
-        )
-        SEND_BREV_STANDARD_BILAG_DROPDOWN = (
-            "div.skabelon-vaelger.dropdown-menu"
-        )
+        SEND_BREV_POSTAGE_CONTAINER = "tr#postage-container0[name='postage-container']"
+        SEND_BREV_POSTAGE_TYPE = "select[name='alleTilfoejedeBreve[0].postage']"
+        SEND_BREV_STANDARD_BILAG_DROPDOWN = "div.skabelon-vaelger.dropdown-menu"
         SEND_BREV_STANDARD_BILAG_SOEG = (
-            "input.skabelonvaelger-soeg"
-            "[placeholder='Søg efter vedhæftning']"
+            "input.skabelonvaelger-soeg[placeholder='Søg efter vedhæftning']"
         )
 
+        UBEHANDLEDE_OPGAVER_TABLE = "table#ubehandlede-opgaver"
+
+        UBEHANDLEDE_OPGAVER_ROWS = (
+            "table#ubehandlede-opgaver tbody.datatable-tbody tr[data-id]"
+        )
+
+        UBEHANDLEDE_OPGAVER_NEXT = (
+            "#ubehandlede-opgaver_next, "
+            "[aria-controls='ubehandlede-opgaver']"
+            ".paginate_button.next"
+        )
+
+        UBEHANDLET_OPGAVE_LINK = "a.undock_panel_button[data-opgave-id][data-url]"
+
         HANDLINGER_CONTAINER = "li#handlinger-dropdown"
-        OPFOELGNING_LOADER = "div#empty_opgave_loader"
+
+        # Kopiér indholdet af class Borgere ind i KYSelectors.Borgere.
+        # Fjern eksisterende dubletter med de samme navne først.
+
+        # Opret opfølgningsopgave
+        OPFOELGNING_LOADER = (
+            "div#empty_opgave_loader, div#opgave_loader, div#opgave-loader"
+        )
+
         OPFOELGNINGSTYPE = "select#opfoelgningsType"
-        OPFOELGNINGSDATO = "input#command\\.opfoelgningsdato"
-        OPFOELGNING_SAGSBEHANDLER = "input#typeahead"
-        OPFOELGNING_TITEL = "input#title"
-        OPFOELGNING_FREKVENS = "select#frekvens"
-        OPFOELGNING_HAENDELSESTYPE = "select#haendelseType"
-        OPFOELGNING_BESKRIVELSE = "textarea#beskrivelse"
+
+        OPFOELGNINGSDATO = (
+            "input#command\\.opfoelgningsdato, "
+            "input[name='opfoelgningsdato'], "
+            "input[name='command.opfoelgningsdato']"
+        )
+
+        OPFOELGNING_SAGSBEHANDLER = "input#typeahead, input[name='sagsbehandler']"
+
+        OPFOELGNING_SAGSBEHANDLER_FORSLAG = (
+            ".tt-menu:visible .tt-suggestion.tt-selectable, "
+            ".typeahead.dropdown-menu:visible li:visible, "
+            "[role='listbox']:visible [role='option']:visible"
+        )
+
+        OPFOELGNING_TITEL = "input#title, input[name='title']"
+
+        OPFOELGNING_FREKVENS = "select#frekvens, select[name='frekvens']"
+
+        OPFOELGNING_HAENDELSESTYPE = (
+            "select#haendelseType, select[name='haendelseType']"
+        )
+
+        OPFOELGNING_BESKRIVELSE = "textarea#beskrivelse, textarea[name='beskrivelse']"
+
         OPFOELGNING_GEM = (
             "button[type='submit']:has-text('Gem'), "
             "input[type='submit'][value='Gem'], "
             "button.btn-submit-form:has-text('Gem'), "
             "a.btn-submit-form:has-text('Gem')"
         )
+
         OPFOELGNING_VALIDERING = (
-            ".has-error:visible, .help-block:visible, "
-            ".alert-danger:visible, .field-validation-error:visible"
+            ".has-error:visible, "
+            ".help-block:visible, "
+            ".alert-danger:visible, "
+            ".field-validation-error:visible"
         )
 
         # Alle åbne borgerfaner.
         # "active" anvendes ikke, fordi alle PERSON-faner skal findes.
-        BORGER_FANER = (
-            "li.tab.topmenu-tab"
-            "[data-tab-target-id='PERSON']"
-        )
+        BORGER_FANER = "li.tab.topmenu-tab[data-tab-target-id='PERSON']"
 
         # Lukkeknapperne i alle åbne borgerfaner.
         LUK_BORGER_FANER = (
@@ -177,30 +189,22 @@ class KYSelectors:
             "[data-entity-type='PERSON']"
         )
 
-        PERSON_FANER = (
-            "li.tab.topmenu-tab"
-            "[data-tab-target-id='PERSON']"
-        )
+        PERSON_FANER = "li.tab.topmenu-tab[data-tab-target-id='PERSON']"
 
         PERSON_LUKKNAPPER = (
             "li.tab.topmenu-tab"
             "[data-tab-target-id='PERSON'] "
             ".navigation-close-tab"
             "[data-entity-type='PERSON']"
-        )        
-
+        )
 
         # Dokumenter på den åbnede opgave
         DOKUMENTER_TOGGLE = (
-            "a[data-toggle='collapse']"
-            ":has(span.panel-title:has-text('Dokumenter'))"
+            "a[data-toggle='collapse']:has(span.panel-title:has-text('Dokumenter'))"
         )
         DOKUMENTER_TABELLER = "table:visible"
         DOKUMENTER_RAEKKER = "tbody tr.table-row"
-        DOKUMENTER_AABN_LINK = (
-            "a[target='_blank']"
-            "[href*='aabnPdfDokument']"
-        )
+        DOKUMENTER_AABN_LINK = "a[target='_blank'][href*='aabnPdfDokument']"
 
         # Navigation async
         OVERBLIK = "li.tab[data-tab-target-id='PERSON_OVERBLIK']"
@@ -220,7 +224,6 @@ class KYSelectors:
         JOBCENTER = "li.tab[data-tab-target-id='PERSON_JOBCENTER']"
         MEDICINTILSKUD = "li.tab[data-tab-target-id='PERSON_MEDICINTILSKUD']"
 
-        
         # Ferie
         FERIEPERIODER_TIL_BEREGNING = "table#ferieperioder-table"
         FRAVÆR_FRA_JOBCENTER = "table#fravaer-table"
@@ -244,15 +247,25 @@ class KYSelectors:
 
         # Handlinger - Indtægter
         INDTÆGTER_MANUEL_INDTASTNING = 'button[data-onclick*="/opgave/indtaegter/formFields"]:has(span[data-textkey="system.medtagkoncept.add"])'
+        # Skriv journalnotat: formular og sag
         JOURNALNOTAT_EXPAND_KOLLAPSET = (
             'div.journalnotat_instans-header a[data-toggle="collapse"]'
         )
+        JOURNALNOTAT_SAGSVAELGER_DROPDOWN = (
+            "#command\\.tilfoejedeJournalnotater\\[0\\]\\.sager_dropdown"
+        )
         JOURNALNOTAT_SAGSVAELGER_INPUT = "input.sagsvaelger-input"
+        JOURNALNOTAT_SAGSVAELGER_EKSAKT_INPUT = (
+            "#command\\.tilfoejedeJournalnotater\\[0\\]\\.sager"
+        )
         JOURNALNOTAT_AKTIV_VALGT_SAG = (
             '#sagsvaelgertable tr.selected[data-tilstand="aktiv"]'
         )
+        JOURNALNOTAT_VALGTE_SAGSRAEKKER = "#sagsvaelgertable tr.selected"
+        JOURNALNOTAT_AKTIV_CHECKBOX = 'input[type="checkbox"][data-tilstand="aktiv"]'
+        JOURNALNOTAT_PASSIV_CHECKBOX = 'input[type="checkbox"][data-tilstand="passiv"]'
         JOURNALNOTAT_AKTIV_CHECKBOX_CHECKED = (
-            'input[type="checkbox"][data-tilstand="aktiv"][checked="checked"]'
+            'input[type="checkbox"][data-tilstand="aktiv"]:checked'
         )
         JOURNALNOTAT_PASSIV_CHECKBOX_CHECKED = (
             'input[type="checkbox"][data-tilstand="passiv"]:checked'
@@ -261,14 +274,49 @@ class KYSelectors:
             'input[type="checkbox"][data-tilstand="passiv"]:not(:checked)'
         )
         JOURNALNOTAT_SAGSVAELGER_SOEG = "input.sagsvaelger-soeg"
-        JOURNALNOTAT_SAGSVAELGER_FOERSTE_RESULTAT = (
-            '#sagsvaelgertable tbody tr:not([style*="display: none"])'
+        JOURNALNOTAT_SAGSVAELGER_RESULTATER = (
+            "#sagsvaelgertable tbody tr:not([style*='display: none'])"
         )
-        JOURNALNOTAT_VAELG_SKABELON = 'input[data-textkey="fagsystem.person.opgave.journalnotat_instans.vaelg_skabelon"]'
+        # Bagudkompatibelt navn til eksisterende kode.
+        JOURNALNOTAT_SAGSVAELGER_FOERSTE_RESULTAT = JOURNALNOTAT_SAGSVAELGER_RESULTATER
+        JOURNALNOTAT_DROPDOWN_CONTAINER = (
+            "div#journalnotat_instans_0_dropdown.dropdown-toggle"
+        )
+
+        # Skriv journalnotat: skabelon
+        JOURNALNOTAT_VAELG_SKABELON = (
+            'input[data-textkey="fagsystem.person.opgave.'
+            'journalnotat_instans.vaelg_skabelon"]'
+        )
+        JOURNALNOTAT_SKABELON_KONTROL = (
+            "input.form-control.skabelon_titel.cursor-pointer"
+            "#tilfoejedeJournalnotater0\\.skabelonTitel"
+            "[name='tilfoejedeJournalnotater[0].skabelonTitel']"
+        )
+        JOURNALNOTAT_SKABELON_TITELFELT = (
+            "input.skabelon_titel.cursor-pointer"
+            "[name='tilfoejedeJournalnotater[0].skabelonTitel']"
+        )
+        JOURNALNOTAT_SKABELON_NOEGLEFELT = (
+            "input[type='hidden'][name='tilfoejedeJournalnotater[0].skabelonNoegle']"
+        )
         JOURNALNOTAT_SKABELONGRUPPE_SOEG = (
             "#journalnotat-group input.form-control.skabelonvaelger-soeg"
         )
+        JOURNALNOTAT_SKABELON_RESULTATER = (
+            "#journalnotat-group li[data-titel], "
+            "#journalnotat-group li.hg-skabelon.cell, "
+            "#journalnotat-group [role='treeitem'], "
+            "#journalnotat-group [role='option'], "
+            "ul.skabelonlist li[data-titel]"
+        )
         JOURNALNOTAT_SKABELONGRUPPE_FOERSTE_RESULTAT = "ul.skabelonlist li.hg.cell li"
+
+        # Midlertidige aliases, så eksisterende skriv_journalnotat.py virker.
+        control_selector = JOURNALNOTAT_SKABELON_KONTROL
+        field_selector = JOURNALNOTAT_SKABELON_TITELFELT
+        key_selector = JOURNALNOTAT_SKABELON_NOEGLEFELT
+
         INDTÆGTER_CVR_SE_NUMMER = "input#indtaegterTable\\.cvrNummer\\.valueString"
         INDTÆGTER_VIRKSOMHEDSNAVN = "input#indtaegterTable\\.cvrNavn\\.valueString"
         INDTÆGTER_TYPE = "select#indtaegterTable\\.indtaegtsType\\.valueString"

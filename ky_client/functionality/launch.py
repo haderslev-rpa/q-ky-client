@@ -24,10 +24,7 @@ from q_haderslev_vbo.playwright.faelles_kommunal_login_idp import (
 from ky_client.selectors import KYSelectors
 
 
-KY_URL = (
-    "https://fs0510.fs.kommunernesydelsessystem.dk"
-    "/ky-fagsystem"
-)
+KY_URL = "https://fs0510.fs.kommunernesydelsessystem.dk/ky-fagsystem"
 
 KY_MUNICIPALITY = "Haderslev Kommune"
 
@@ -54,6 +51,7 @@ NAVIGATION_TIMEOUT_MS = 120_000
 ACTION_TIMEOUT_MS = 30_000
 LOGIN_TIMEOUT_MS = 120_000
 POLL_INTERVAL_MS = 500
+
 
 class KyLaunchError(RuntimeError):
     """Fejl under launch eller login i KY."""
@@ -82,12 +80,7 @@ async def optional_screenshot(
             name=name,
         )
     except Exception as error:
-        print(
-            "Valgfrit skærmbillede fejlede: "
-            f"{type(error).__name__}: {error}"
-        )
-
-
+        print(f"Valgfrit skærmbillede fejlede: {type(error).__name__}: {error}")
 
 
 async def wait_for_page_ready(
@@ -137,10 +130,7 @@ def is_ky_url(page: Page) -> bool:
 def is_ky_error_url(page: Page) -> bool:
     """Returnér True, hvis KY viser fejlsiden."""
 
-    return (
-        not page.is_closed()
-        and KY_ERROR_PATH.casefold() in page.url.casefold()
-    )
+    return not page.is_closed() and KY_ERROR_PATH.casefold() in page.url.casefold()
 
 
 async def has_jsessionid(page: Page) -> bool:
@@ -155,8 +145,7 @@ async def has_jsessionid(page: Page) -> bool:
         return False
 
     return any(
-        cookie.get("name", "").casefold() == "jsessionid"
-        and bool(cookie.get("value"))
+        cookie.get("name", "").casefold() == "jsessionid" and bool(cookie.get("value"))
         for cookie in cookies
     )
 
@@ -187,10 +176,7 @@ async def raise_if_ky_error(
     except (PlaywrightError, PlaywrightTimeoutError):
         pass
 
-    message = (
-        f"KY viste en fejlside under '{stage}'. "
-        f"URL: {page.url}"
-    )
+    message = f"KY viste en fejlside under '{stage}'. URL: {page.url}"
 
     if body_text:
         message += f". Fejltekst: {body_text[:500]}"
@@ -208,9 +194,7 @@ async def wait_for_ky_ready(
 
     while elapsed_ms < timeout_ms:
         if page.is_closed():
-            raise KyLaunchError(
-                "Browserfanen blev lukket under ventetiden på KY."
-            )
+            raise KyLaunchError("Browserfanen blev lukket under ventetiden på KY.")
 
         await raise_if_ky_error(
             page,
@@ -423,9 +407,7 @@ async def _find_visible_enabled_button(
         await page.wait_for_timeout(250)
         elapsed_ms += 250
 
-    raise KyLaunchError(
-        "En synlig og aktiv OK/Vælg-knap blev ikke fundet."
-    )
+    raise KyLaunchError("En synlig og aktiv OK/Vælg-knap blev ikke fundet.")
 
 
 def _set_session_page(

@@ -67,9 +67,7 @@ async def test_launch_ky() -> None:
         page = await session.new_page()
 
         page.set_default_timeout(PAGE_TIMEOUT_MS)
-        page.set_default_navigation_timeout(
-            NAVIGATION_TIMEOUT_MS
-        )
+        page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
 
         recorder = getattr(
             session,
@@ -90,10 +88,7 @@ async def test_launch_ky() -> None:
         print("=" * 70)
         print("LAUNCHER KY")
         print("=" * 70)
-        print(
-            "Credential-post i Automation Server: "
-            f"{KY_CREDENTIAL_NAME}"
-        )
+        print(f"Credential-post i Automation Server: {KY_CREDENTIAL_NAME}")
 
         await launch_ky(
             page=page,
@@ -108,18 +103,14 @@ async def test_launch_ky() -> None:
             timeout_ms=NAVIGATION_TIMEOUT_MS,
         )
 
-        assert not page.is_closed(), (
-            "Playwright-siden blev lukket under KY-launch."
-        )
+        assert not page.is_closed(), "Playwright-siden blev lukket under KY-launch."
 
         assert not is_ky_error_url(page), (
-            "KY viste fejlsiden efter launch. "
-            f"Aktuel URL: {page.url}"
+            f"KY viste fejlsiden efter launch. Aktuel URL: {page.url}"
         )
 
         assert is_ky_url(page), (
-            "Siden er ikke en gyldig KY-side efter launch. "
-            f"Aktuel URL: {page.url}"
+            f"Siden er ikke en gyldig KY-side efter launch. Aktuel URL: {page.url}"
         )
 
         assert await has_jsessionid(page), (
