@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Any, TypedDict
-
-from ky_client.functionality.borgere import OpstartOpgaveCheckpoint
+from typing import TypedDict
 
 from playwright.async_api import Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+from ky_client.functionality.borgere import OpstartOpgaveCheckpoint
 
 from ..selectors import KYSelectors
 

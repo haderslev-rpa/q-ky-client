@@ -200,10 +200,19 @@ class KYSelectors:
 
         # Dokumenter på den åbnede opgave
         DOKUMENTER_TOGGLE = (
-            "a[data-toggle='collapse']:has(span.panel-title:has-text('Dokumenter'))"
+            "a[data-toggle='collapse']"
+            "[href='#vedhaeftninger']"
+            ":has(span.panel-title:has-text('Dokumenter'))"
         )
+        DOKUMENTER_PANEL_CONTAINER = (
+            "xpath=ancestor::div["
+            "contains(concat(' ', normalize-space(@class), ' '), ' panel ')"
+            "][1]"
+        )
+        DOKUMENTER_PANEL = "xpath=.//*[@id='vedhaeftninger']"
         DOKUMENTER_TABELLER = "table:visible"
         DOKUMENTER_RAEKKER = "tbody tr.table-row"
+        DOKUMENTER_CELLER = "td:not(.handlinger), [role='gridcell']"
         DOKUMENTER_AABN_LINK = "a[target='_blank'][href*='aabnPdfDokument']"
 
         # Navigation async

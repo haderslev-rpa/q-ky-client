@@ -482,7 +482,7 @@ def _set_recorder_page(
 def _print_step(title: str) -> None:
     """Print en tydelig sektionsoverskrift."""
 
-    print("", flush=True)
+    print(flush=True)
     print("=" * 70, flush=True)
     print(title, flush=True)
     print("=" * 70, flush=True)

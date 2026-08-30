@@ -7,15 +7,19 @@ defineret med ``async def`` og skal kaldes med ``await``.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Sequence
 from typing import Any, TypedDict
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Frame, Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from ky_client.selectors import KYSelectors
+
+logger = logging.getLogger(__name__)
 
 ACTION_TIMEOUT_MS = 30_000
 OPGAVE_TIMEOUT_MS = 120_000
@@ -154,7 +158,9 @@ class BorgereClient:
 
         raw_rows = snapshot.get("rows", [])
         if not isinstance(raw_rows, list):
-            raise RuntimeError("Personoplysninger gav ikke en gyldig rækkeliste.")
+            raise TypeError(
+                "Personoplysninger gav ikke en gyldig rækkeliste."
+            )
 
         resultat: list[Personoplysning] = []
         for raw_row in raw_rows:
@@ -346,7 +352,7 @@ async def naviger_til_borger(
             )
             return borger_url
 
-        except Exception as error:
+        except PlaywrightError as error:
             seneste_fejl = f"{type(error).__name__}: {error}"
             print(f"Borgeropslag fejlede på forsøg {forsog}: {seneste_fejl}")
             await _luk_faner_aabnet_under_forsog(
@@ -416,7 +422,7 @@ async def _vent_paa_stabil_personoplysninger_tabel(
                     readable_rows = snapshot.get("rows", [])
                     if readable_rows:
                         candidates.append((table, snapshot))
-            except Exception:
+            except PlaywrightError:
                 # KY kan kortvarigt detach'e tabellen under faneskift.
                 continue
 
@@ -508,7 +514,10 @@ async def _laes_personoplysninger_snapshot(table) -> dict[str, object]:
         """
     )
     if not isinstance(snapshot, dict):
-        raise RuntimeError("Personoplysninger gav ikke et læsbart DOM-snapshot.")
+        raise TypeError(
+            "Personoplysninger gav ikke et læsbart DOM-snapshot."
+        )
+
     return snapshot
 
 
@@ -532,7 +541,7 @@ async def _hent_aabne_borger_ids(page: Page) -> set[str]:
     for index in range(await buttons.count()):
         try:
             entity_id = await buttons.nth(index).get_attribute("data-entity-id")
-        except Exception:
+        except PlaywrightError:
             continue
         if entity_id:
             ids.add(entity_id.strip())
@@ -581,7 +590,7 @@ async def _luk_faner_aabnet_under_forsog(
     for entity_id in aabne_ids_efter - aabne_ids_foer:
         try:
             await luk_borgerfane(page, entity_id, timeout_ms)
-        except Exception as error:
+        except PlaywrightError as error:
             print(
                 f"Kunne ikke lukke PERSON-fane {entity_id}: "
                 f"{type(error).__name__}: {error}"
@@ -620,7 +629,7 @@ async def luk_borgerfane(
                 if await candidate.is_enabled():
                     await candidate.click(timeout=min(30_000, timeout_ms))
                     break
-        except Exception:
+        except PlaywrightError:
             continue
 
     elapsed_ms = 0
@@ -731,7 +740,7 @@ async def find_aktivt_topsearch(
 
                         return frame, candidate
 
-                except Exception:
+                except PlaywrightError:
                     continue
 
         last_diagnostic = diagnostic
@@ -795,7 +804,7 @@ async def klik_topsearch_knap(
 
                     return True
 
-            except Exception:
+            except PlaywrightError:
                 continue
 
     return False
@@ -848,7 +857,7 @@ async def vent_paa_synlig_personoplysninger(
                     if readable_rows > 0:
                         return table
 
-            except Exception as error:
+            except PlaywrightError as error:
                 diagnostic.append(
                     {
                         "frame": frame.url,
@@ -981,7 +990,10 @@ async def laes_personoplysninger(
     )
 
     if not isinstance(rows, list):
-        raise RuntimeError("Personoplysninger blev ikke returneret som en liste.")
+        raise TypeError(
+            "Personoplysninger blev ikke returneret som en liste."
+        )
+
 
     result: list[dict[str, str]] = []
 
@@ -1013,10 +1025,7 @@ def print_personoplysninger(
 
     assert rows, f"Personoplysninger for {heading} indeholdt ingen læsbare rækker."
 
-    print(
-        "",
-        flush=True,
-    )
+    print(flush=True)
     print(
         "-" * 70,
         flush=True,
@@ -1067,7 +1076,7 @@ async def hent_person_tab_ids(
     for index in range(await close_buttons.count()):
         try:
             entity_id = await close_buttons.nth(index).get_attribute("data-entity-id")
-        except Exception:
+        except PlaywrightError:
             continue
 
         if not entity_id:
@@ -1160,7 +1169,7 @@ async def luk_borgerfaner(
                     entity_id=entity_id,
                     timeout_ms=timeout_ms,
                 )
-            except Exception as error:
+            except PlaywrightError as error:
                 print(
                     "Kunne ikke lukke PERSON-fane "
                     f"{entity_id}: "
@@ -1218,7 +1227,7 @@ async def haandter_eventuel_lukke_dialog(
 
             return
 
-        except Exception:
+        except PlaywrightError:
             continue
 
 
@@ -1246,7 +1255,7 @@ async def vent_paa_person_fane_lukket(
                 if await buttons.nth(index).is_visible():
                     visible = True
                     break
-            except Exception:
+            except PlaywrightError:
                 continue
 
         if not visible:
@@ -1410,7 +1419,7 @@ async def _find_synligt_handlinger_menupunkt(
                 visible_text = _normaliser_tekst(await candidate.inner_text())
                 if pattern.fullmatch(visible_text):
                     return candidate
-        except Exception:
+        except PlaywrightError:
             # KY genopbygger dropdown-DOM'en, når undermenuer åbnes.
             pass
 
@@ -1465,7 +1474,7 @@ async def _vent_paa_opgave_checkpoint(
                     and opgave_id in data_url
                     and "expanded" in classes
                 )
-        except Exception:
+        except PlaywrightError:
             ready = False
 
         if ready:
@@ -1783,7 +1792,7 @@ async def find_matchende_ubehandlet_opgave(
 
             except RuntimeError:
                 raise
-            except Exception:
+            except PlaywrightError:
                 continue
 
         if len(sikre_matches) == 1:
@@ -2102,7 +2111,7 @@ async def _er_opgave_loader_synlig(page: Page) -> bool:
         try:
             if await loaders.nth(index).is_visible():
                 return True
-        except Exception:
+        except PlaywrightError:
             continue
 
     return False
@@ -2121,10 +2130,11 @@ async def _hent_opgavenavn_fra_header(header: Locator) -> str:
             value = _normaliser_tekst(await candidate.inner_text())
             if value:
                 return value
-        except Exception:
+        except PlaywrightError:
             continue
 
     raise RuntimeError("Opgavenavnet kunne ikke læses fra opgaveheaderen.")
+
 
 def _normaliser_tekst(value: str) -> str:
     """Saml whitespace og fjern mellemrum før og efter teksten."""
@@ -2134,3 +2144,659 @@ def _normaliser_tekst(value: str) -> str:
         " ",
         str(value or ""),
     ).strip()
+
+# ---------------------------------------------------------------------------
+# Modtag post: Find og åbn dokument på den valgte opgave
+# ---------------------------------------------------------------------------
+
+
+class ModtagPostDokumentResultat(TypedDict):
+    """Resultat fra ``modtag_post_dokument()``."""
+
+    dokument: str
+    fundet: bool
+    aaben_dokument: bool
+    dokument_aabnet: bool
+    dokumenttekst: str
+    dokument_url: str
+    aabnet_url: str
+
+
+async def modtag_post_dokument(
+    page: Page,
+    opgave_url: str,
+    aaben_dokument: bool,
+    dokument: str,
+    timeout: int = OPGAVE_TIMEOUT_MS,
+) -> ModtagPostDokumentResultat:
+    """Navigér til en Modtag post-opgave og find et dokument.
+
+    URL'en anvendes uændret. Dokumentstrukturen findes via
+    ``KYSelectors.Borgere``. Dokumentet åbnes kun, når
+    ``aaben_dokument=True``.
+    """
+
+    _modtag_post_valider_input(
+        page=page,
+        opgave_url=opgave_url,
+        aaben_dokument=aaben_dokument,
+        dokument=dokument,
+        timeout=timeout,
+    )
+
+    opgave_url = opgave_url.strip()
+    dokument = _modtag_post_normaliser_tekst(dokument)
+
+    logger.info(
+        "Starter dokumentopslag. Kriterium=%r, åbn dokument=%s.",
+        dokument,
+        aaben_dokument,
+    )
+
+    try:
+        response = await page.goto(
+            opgave_url,
+            wait_until="domcontentloaded",
+            timeout=timeout,
+        )
+    except PlaywrightTimeoutError as error:
+        raise PlaywrightTimeoutError(
+            "Navigationen til Modtag post-opgaven fik timeout. "
+            f"URL={opgave_url!r}."
+        ) from error
+    except PlaywrightError as error:
+        raise RuntimeError(
+            "Navigationen til Modtag post-opgaven fejlede. "
+            f"URL={opgave_url!r}, fejl={error}."
+        ) from error
+
+    if page.is_closed():
+        raise RuntimeError("KY-siden blev lukket under navigationen.")
+
+    if response is not None and response.status >= 400:
+        raise RuntimeError(
+            "Modtag post-opgaven returnerede en HTTP-fejl. "
+            f"Status={response.status}, URL={opgave_url!r}."
+        )
+
+    await _modtag_post_bekraeft_opgave(page=page, timeout=timeout)
+    dokument_panel = await _modtag_post_aabn_dokumentpanel(
+        page=page,
+        timeout=timeout,
+    )
+    matchende_raekke = await _modtag_post_find_dokumentraekke(
+        page=page,
+        dokument_panel=dokument_panel,
+        dokument=dokument,
+        timeout=timeout,
+    )
+
+    if matchende_raekke is None:
+        logger.info("Dokument blev ikke fundet. Kriterium=%r.", dokument)
+        return {
+            "dokument": dokument,
+            "fundet": False,
+            "aaben_dokument": aaben_dokument,
+            "dokument_aabnet": False,
+            "dokumenttekst": "",
+            "dokument_url": "",
+            "aabnet_url": "",
+        }
+
+    try:
+        dokumenttekst = _modtag_post_normaliser_tekst(
+            await matchende_raekke.inner_text()
+        )
+    except PlaywrightError as error:
+        raise RuntimeError(
+            "Den matchende dokumentrække kunne ikke læses. "
+            f"Dokument={dokument!r}, fejl={error}."
+        ) from error
+
+    if not dokumenttekst:
+        raise RuntimeError(
+            "Den matchende dokumentrække indeholder ingen læsbar tekst."
+        )
+
+    dokument_link = await _modtag_post_find_dokumentlink(
+        matchende_raekke=matchende_raekke,
+        dokument=dokument,
+        dokumenttekst=dokumenttekst,
+    )
+    dokument_url = (
+        await dokument_link.get_attribute("href") or ""
+    ).strip()
+
+    if not dokument_url:
+        raise RuntimeError("Dokumentets link mangler href.")
+
+    logger.info("Dokument fundet. Kriterium=%r.", dokument)
+    logger.debug(
+        "Fundet dokumentrække. Tekst=%r, URL=%r.",
+        dokumenttekst,
+        dokument_url,
+    )
+
+    if not aaben_dokument:
+        return {
+            "dokument": dokument,
+            "fundet": True,
+            "aaben_dokument": False,
+            "dokument_aabnet": False,
+            "dokumenttekst": dokumenttekst,
+            "dokument_url": dokument_url,
+            "aabnet_url": "",
+        }
+
+    aabnet_url = await _modtag_post_aabn_dokumentlink(
+        page=page,
+        dokument_link=dokument_link,
+        timeout=timeout,
+    )
+    aabnet_url = _modtag_post_normaliser_tekst(aabnet_url)
+
+    if not aabnet_url:
+        raise RuntimeError(
+            "Dokumentlinket blev aktiveret, men den åbnede URL er tom."
+        )
+
+    logger.info("Dokument åbnet. Kriterium=%r.", dokument)
+    return {
+        "dokument": dokument,
+        "fundet": True,
+        "aaben_dokument": True,
+        "dokument_aabnet": True,
+        "dokumenttekst": dokumenttekst,
+        "dokument_url": dokument_url,
+        "aabnet_url": aabnet_url,
+    }
+
+
+def _modtag_post_valider_input(
+    page: Page,
+    opgave_url: str,
+    aaben_dokument: bool,
+    dokument: str,
+    timeout: int,
+) -> None:
+    """Validér input før browserhandlinger udføres."""
+
+    if not isinstance(page, Page):
+        raise TypeError("page skal være en async Playwright Page.")
+    if not isinstance(opgave_url, str):
+        raise TypeError("opgave_url skal være en tekststreng.")
+    if not isinstance(aaben_dokument, bool):
+        raise TypeError("aaben_dokument skal være True eller False.")
+    if not isinstance(dokument, str):
+        raise TypeError("dokument skal være en tekststreng.")
+    if not isinstance(timeout, int):
+        raise TypeError("timeout skal være et heltal i millisekunder.")
+    if timeout <= 0:
+        raise ValueError("timeout skal være større end 0.")
+    if not opgave_url.strip():
+        raise ValueError("opgave_url må ikke være tom.")
+    if re.match(r"^https?://", opgave_url.strip(), re.IGNORECASE) is None:
+        raise ValueError(
+            "opgave_url skal være en absolut HTTP- eller HTTPS-URL. "
+            f"Modtaget værdi={opgave_url!r}."
+        )
+    if not _modtag_post_normaliser_tekst(dokument):
+        raise ValueError("dokument må ikke være tomt.")
+    if page.is_closed():
+        raise RuntimeError("KY-siden er lukket før navigationen.")
+
+
+async def _modtag_post_bekraeft_opgave(
+    page: Page,
+    timeout: int,
+) -> None:
+    """Vent på et synligt eksakt match af Modtag post eller Modtaget post."""
+
+    moenster = re.compile(
+        r"^\s*Modtag(?:et)?\s+post\s*$",
+        flags=re.IGNORECASE,
+    )
+    elapsed_ms = 0
+
+    while elapsed_ms < timeout:
+        if page.is_closed():
+            raise RuntimeError(
+                "KY-siden blev lukket under kontrollen af Modtag post."
+            )
+
+        for frame in page.frames:
+            try:
+                candidates = frame.get_by_text(moenster, exact=True)
+                for index in range(await candidates.count()):
+                    candidate = candidates.nth(index)
+                    if not await candidate.is_visible():
+                        continue
+                    text = _modtag_post_normaliser_tekst(
+                        await candidate.inner_text()
+                    )
+                    if moenster.fullmatch(text):
+                        logger.debug("Modtag post-opgave bekræftet: %r.", text)
+                        return
+            except PlaywrightError as error:
+                logger.debug(
+                    "Opgavetekst kunne ikke undersøges i frame %r: %s.",
+                    frame.url,
+                    error,
+                )
+
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+
+    raise PlaywrightTimeoutError(
+        "Hverken 'Modtag post' eller 'Modtaget post' blev synlig "
+        f"inden for {timeout / 1_000:.0f} sekunder. URL={page.url!r}."
+    )
+
+
+async def _modtag_post_aabn_dokumentpanel(
+    page: Page,
+    timeout: int,
+) -> Locator:
+    """Find den entydige Dokumenter-toggle og åbn dens lokale panel."""
+
+    toggle_matches = page.locator(KYSelectors.Borgere.DOKUMENTER_TOGGLE)
+    await toggle_matches.first.wait_for(state="attached", timeout=timeout)
+
+    kandidatpar: list[tuple[Locator, Locator]] = []
+
+    for index in range(await toggle_matches.count()):
+        toggle = toggle_matches.nth(index)
+        try:
+            if not await toggle.is_visible():
+                continue
+
+            container = toggle.locator(
+                KYSelectors.Borgere.DOKUMENTER_PANEL_CONTAINER
+            )
+            if await container.count() == 0:
+                continue
+
+            paneler = container.first.locator(
+                KYSelectors.Borgere.DOKUMENTER_PANEL
+            )
+            if await paneler.count() == 0:
+                continue
+
+            kandidatpar.append((toggle, paneler.first))
+        except PlaywrightError as error:
+            logger.debug(
+                "Dokumenter-kandidat kunne ikke undersøges. "
+                "Indeks=%d, fejl=%s.",
+                index,
+                error,
+            )
+
+    if len(kandidatpar) != 1:
+        raise RuntimeError(
+            "Dokumenter-toggle og panel er ikke entydige. "
+            f"Antal kandidater={len(kandidatpar)}, URL={page.url!r}."
+        )
+
+    dokument_toggle, dokument_panel = kandidatpar[0]
+    await dokument_toggle.scroll_into_view_if_needed()
+
+    if not await _modtag_post_vent_paa_aabent_dokumentpanel(
+        page=page,
+        dokument_toggle=dokument_toggle,
+        dokument_panel=dokument_panel,
+        timeout=min(500, timeout),
+        fejl_ved_timeout=False,
+    ):
+        try:
+            await dokument_toggle.click(
+                timeout=min(ACTION_TIMEOUT_MS, timeout)
+            )
+        except PlaywrightError as error:
+            logger.debug(
+                "Normalt klik fejlede. Forsøger MouseEvent. Fejl=%s.",
+                error,
+            )
+            await dokument_toggle.evaluate(
+                """
+                element => element.dispatchEvent(
+                    new MouseEvent('click', {
+                        view: window,
+                        bubbles: true,
+                        cancelable: true,
+                        composed: true,
+                        button: 0
+                    })
+                )
+                """
+            )
+
+    aabnet = await _modtag_post_vent_paa_aabent_dokumentpanel(
+        page=page,
+        dokument_toggle=dokument_toggle,
+        dokument_panel=dokument_panel,
+        timeout=min(5_000, timeout),
+        fejl_ved_timeout=False,
+    )
+
+    if not aabnet:
+        bootstrap_resultat = await dokument_toggle.evaluate(
+            """
+            toggle => {
+                const container = toggle.closest('.panel');
+                const panel = container
+                    ? container.querySelector('[id="vedhaeftninger"]')
+                    : null;
+                const jq = window.jQuery || window.$;
+                if (
+                    panel
+                    && typeof jq === 'function'
+                    && jq.fn
+                    && typeof jq.fn.collapse === 'function'
+                ) {
+                    jq(panel).collapse('show');
+                    return true;
+                }
+                return false;
+            }
+            """
+        )
+        if not bootstrap_resultat:
+            raise RuntimeError(
+                "Dokumenter-panelet kunne ikke åbnes via klik eller Bootstrap."
+            )
+
+    await _modtag_post_vent_paa_aabent_dokumentpanel(
+        page=page,
+        dokument_toggle=dokument_toggle,
+        dokument_panel=dokument_panel,
+        timeout=timeout,
+        fejl_ved_timeout=True,
+    )
+    logger.debug("Dokumenter-panelet er åbent.")
+    return dokument_panel
+
+
+async def _modtag_post_vent_paa_aabent_dokumentpanel(
+    page: Page,
+    dokument_toggle: Locator,
+    dokument_panel: Locator,
+    timeout: int,
+    fejl_ved_timeout: bool,
+) -> bool:
+    """Vent på to stabile kontroller af et åbent og synligt panel."""
+
+    elapsed_ms = 0
+    stable_checks = 0
+    seneste_aria_expanded = ""
+    seneste_panel_class = ""
+    seneste_panel_synligt = False
+
+    while elapsed_ms < timeout:
+        if page.is_closed():
+            raise RuntimeError(
+                "KY-siden blev lukket under åbning af Dokumenter-panelet."
+            )
+        try:
+            seneste_aria_expanded = (
+                await dokument_toggle.get_attribute("aria-expanded") or ""
+            ).strip().casefold()
+            seneste_panel_class = (
+                await dokument_panel.get_attribute("class") or ""
+            ).strip()
+            seneste_panel_synligt = await dokument_panel.is_visible()
+            if (
+                _modtag_post_panel_er_aabent(
+                    aria_expanded=seneste_aria_expanded,
+                    panel_class=seneste_panel_class,
+                )
+                and seneste_panel_synligt
+            ):
+                stable_checks += 1
+                if stable_checks >= 2:
+                    return True
+            else:
+                stable_checks = 0
+        except PlaywrightError as error:
+            stable_checks = 0
+            logger.debug("Kunne ikke aflæse dokumentpanelet: %s.", error)
+
+        await page.wait_for_timeout(100)
+        elapsed_ms += 100
+
+    if not fejl_ved_timeout:
+        return False
+
+    raise PlaywrightTimeoutError(
+        "Dokumenter-panelet blev ikke åbnet inden for "
+        f"{timeout / 1_000:.0f} sekunder. "
+        f"aria-expanded={seneste_aria_expanded!r}, "
+        f"panelklasse={seneste_panel_class!r}, "
+        f"panel-synligt={seneste_panel_synligt}, URL={page.url!r}."
+    )
+
+
+def _modtag_post_panel_er_aabent(
+    aria_expanded: str,
+    panel_class: str,
+) -> bool:
+    """Kontrollér Bootstrap-collapse-tilstanden."""
+
+    classes = {
+        value.casefold()
+        for value in str(panel_class or "").split()
+        if value
+    }
+    return (
+        str(aria_expanded or "").strip().casefold() == "true"
+        or "in" in classes
+        or "show" in classes
+    )
+
+
+async def _modtag_post_find_dokumentraekke(
+    page: Page,
+    dokument_panel: Locator,
+    dokument: str,
+    timeout: int,
+) -> Locator | None:
+    """Find en entydig dokumentrække ud fra dokumentkriteriet.
+
+    Kriteriet ``p10`` matches som P10 efterfulgt af tal. For andre
+    kriterier prioriteres eksakte cellematch over delvise rækkematch.
+    """
+
+    wanted = _modtag_post_normaliser_tekst(dokument).casefold()
+    brug_p10_pattern = wanted == "p10"
+    p10_pattern = re.compile(
+        r"(?<![A-Za-z0-9])P10[\s_-]*\d+(?!\d)",
+        flags=re.IGNORECASE,
+    )
+    elapsed_ms = 0
+
+    while elapsed_ms < timeout:
+        if page.is_closed():
+            raise RuntimeError("KY-siden blev lukket under dokumentsøgningen.")
+
+        rows = dokument_panel.locator(
+            KYSelectors.Borgere.DOKUMENTER_RAEKKER
+        )
+        eksakte: list[tuple[Locator, str]] = []
+        delvise: list[tuple[Locator, str]] = []
+        laesbare_raekker = 0
+
+        for index in range(await rows.count()):
+            row = rows.nth(index)
+            try:
+                if not await row.is_visible():
+                    continue
+
+                row_text = _modtag_post_normaliser_tekst(
+                    await row.inner_text()
+                )
+                if not row_text:
+                    continue
+
+                laesbare_raekker += 1
+                logger.debug("Dokumentrække %d: %s", index + 1, row_text)
+
+                if brug_p10_pattern:
+                    if p10_pattern.search(row_text) is not None:
+                        eksakte.append((row, row_text))
+                    continue
+
+                cells = row.locator(KYSelectors.Borgere.DOKUMENTER_CELLER)
+                cell_values: list[str] = []
+                for cell_index in range(await cells.count()):
+                    cell = cells.nth(cell_index)
+                    if not await cell.is_visible():
+                        continue
+                    cell_values.append(
+                        _modtag_post_normaliser_tekst(
+                            await cell.inner_text()
+                        )
+                    )
+
+                if (
+                    any(value.casefold() == wanted for value in cell_values)
+                    or row_text.casefold() == wanted
+                ):
+                    eksakte.append((row, row_text))
+                elif wanted in row_text.casefold():
+                    delvise.append((row, row_text))
+            except PlaywrightError as error:
+                logger.debug(
+                    "Dokumentrække kunne ikke undersøges. "
+                    "Indeks=%d, fejl=%s.",
+                    index,
+                    error,
+                )
+
+        matches = eksakte if eksakte else delvise
+        if len(matches) == 1:
+            logger.debug("Dokumentrække fundet: %s", matches[0][1])
+            return matches[0][0]
+        if len(matches) > 1:
+            raise RuntimeError(
+                "Flere dokumentrækker matcher kriteriet. "
+                f"Dokument={dokument!r}, "
+                f"matches={[text for _, text in matches]!r}."
+            )
+        if laesbare_raekker > 0:
+            return None
+
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+
+    return None
+
+
+async def _modtag_post_find_dokumentlink(
+    matchende_raekke: Locator,
+    dokument: str,
+    dokumenttekst: str,
+) -> Locator:
+    """Returnér præcis ét synligt og aktivt dokumentlink i rækken."""
+
+    links = matchende_raekke.locator(
+        KYSelectors.Borgere.DOKUMENTER_AABN_LINK
+    )
+    synlige_links: list[Locator] = []
+
+    for index in range(await links.count()):
+        link = links.nth(index)
+        try:
+            if await link.is_visible() and await link.is_enabled():
+                synlige_links.append(link)
+        except PlaywrightError as error:
+            logger.debug(
+                "Dokumentlink kunne ikke undersøges. Indeks=%d, fejl=%s.",
+                index,
+                error,
+            )
+
+    if len(synlige_links) != 1:
+        raise RuntimeError(
+            "Dokumentrækken skal indeholde præcis ét synligt og aktivt link. "
+            f"Dokument={dokument!r}, antal={len(synlige_links)}, "
+            f"rækketekst={dokumenttekst!r}."
+        )
+
+    return synlige_links[0]
+
+
+async def _modtag_post_aabn_dokumentlink(
+    page: Page,
+    dokument_link: Locator,
+    timeout: int,
+) -> str:
+    """Klik på dokumentlinket og returnér den åbnede URL."""
+
+    if page.is_closed():
+        raise RuntimeError("KY-siden er lukket før dokumentet åbnes.")
+
+    await dokument_link.wait_for(state="visible", timeout=timeout)
+    await dokument_link.scroll_into_view_if_needed()
+    href = (await dokument_link.get_attribute("href") or "").strip()
+    target = (await dokument_link.get_attribute("target") or "").strip()
+
+    if not href:
+        raise RuntimeError("Dokumentlinket mangler href.")
+
+    if target.casefold() == "_blank":
+        try:
+            async with page.expect_popup(timeout=timeout) as popup_info:
+                await dokument_link.click(
+                    timeout=min(ACTION_TIMEOUT_MS, timeout)
+                )
+            dokument_page = await popup_info.value
+            try:
+                await dokument_page.wait_for_load_state(
+                    "domcontentloaded",
+                    timeout=timeout,
+                )
+            except PlaywrightTimeoutError:
+                # Browserens PDF-viewer udløser ikke altid DOMContentLoaded.
+                pass
+
+            elapsed_ms = 0
+            while (
+                dokument_page.url == "about:blank"
+                and elapsed_ms < timeout
+                and not dokument_page.is_closed()
+            ):
+                await dokument_page.wait_for_timeout(POLL_INTERVAL_MS)
+                elapsed_ms += POLL_INTERVAL_MS
+
+            aabnet_url = dokument_page.url.strip()
+            if not aabnet_url or aabnet_url == "about:blank":
+                raise RuntimeError(
+                    "Dokumentfanen blev åbnet uden en læsbar URL."
+                )
+            return aabnet_url
+        except PlaywrightTimeoutError as error:
+            raise PlaywrightTimeoutError(
+                "Dokumentlinket blev klikket, men ingen ny fane blev åbnet. "
+                f"href={href!r}."
+            ) from error
+
+    url_foer_klik = page.url
+    await dokument_link.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
+    elapsed_ms = 0
+
+    while elapsed_ms < timeout:
+        if page.is_closed():
+            return href
+        if page.url != url_foer_klik:
+            return page.url
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+
+    raise PlaywrightTimeoutError(
+        "Dokumentlinket blev klikket, men siden skiftede ikke URL."
+    )
+
+
+def _modtag_post_normaliser_tekst(value: Any) -> str:
+    """Saml whitespace og trim tekst."""
+
+    return re.sub(r"\s+", " ", str(value or "")).strip()

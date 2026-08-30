@@ -44,7 +44,6 @@ from ky_client.functionality.borgere import (
     POLL_INTERVAL_MS,
 )
 
-
 FORVENTET_OPGAVENAVN = "Opret opfølgningsopgave"
 FORVENTET_MENU_STI = ("Administration", FORVENTET_OPGAVENAVN)
 

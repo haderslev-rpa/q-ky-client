@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import pytest
 from playwright.async_api import Page
-
 from q_haderslev_vbo.playwright.browser_session import BrowserSession
 
 from ky_client.functionality.launch import (
@@ -30,7 +29,6 @@ from ky_client.functionality.launch import (
     launch_ky,
     wait_for_ky_ready,
 )
-
 
 pytestmark = [
     pytest.mark.integration,

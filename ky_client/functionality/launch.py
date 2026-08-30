@@ -8,12 +8,15 @@ Fælleskommunale IDP-funktion.
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from playwright.async_api import (
     Error as PlaywrightError,
+)
+from playwright.async_api import (
     Locator,
     Page,
+)
+from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 from q_haderslev_vbo.playwright.browser_session import BrowserSession
@@ -22,7 +25,6 @@ from q_haderslev_vbo.playwright.faelles_kommunal_login_idp import (
 )
 
 from ky_client.selectors import KYSelectors
-
 
 KY_URL = "https://fs0510.fs.kommunernesydelsessystem.dk/ky-fagsystem"
 

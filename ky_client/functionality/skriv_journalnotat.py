@@ -15,7 +15,6 @@ from ky_client.functionality.borgere import (
 )
 from ky_client.selectors import KYSelectors
 
-
 ACTION_TIMEOUT_MS = 30_000
 POLL_INTERVAL_MS = 250
 
