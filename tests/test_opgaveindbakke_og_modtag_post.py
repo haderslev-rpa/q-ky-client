@@ -34,6 +34,7 @@ from typing import Any
 import pytest
 from playwright.async_api import Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
 from q_haderslev_vbo.playwright.browser_session import BrowserSession
 
 from ky_client.functionality.borgere import (
@@ -52,6 +53,7 @@ from ky_client.functionality.opgaveindbakke import (
     OpgaveindbakkeClient,
     OpgaveindbakkeError,
 )
+
 
 pytestmark = [
     pytest.mark.integration,
@@ -314,7 +316,10 @@ async def test_opgaveindbakke_og_modtag_post_dokument(
             f"tilgængelige felter={list(valgt_opgave)!r}."
         )
 
-    print(flush=True)
+    print(
+        "",
+        flush=True,
+    )
 
     print(
         f"Opgave-Id: {opgave_id or '(mangler)'}",
@@ -755,7 +760,10 @@ def _print_opgaver(
         opgaver,
         start=1,
     ):
-        print(flush=True)
+        print(
+            "",
+            flush=True,
+        )
 
         print(
             "-" * 70,
@@ -798,7 +806,9 @@ def _print_dokument_resultat(
         flush=True,
     )
 
-    print(flush=True)
+    print(
+        flush=True,
+    )
 
     print(
         f"Dokument: {resultat['dokument']!r}",
@@ -886,7 +896,9 @@ def _print_step(
 ) -> None:
     """Print en sektionsoverskrift."""
 
-    print(flush=True)
+    print(
+        flush=True,
+    )
 
     print(
         "=" * 70,

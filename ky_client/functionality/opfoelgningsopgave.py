@@ -27,7 +27,7 @@ Eksempel::
     )
 
 Sikker standard:
-    ``test=True`` udfylder og validerer formularen, men klikker ikke på Gem.
+    ``test=True`` udfylder og validerer formularen, men klikker ikke på Godkend.
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ from ky_client.functionality.borgere import (
     POLL_INTERVAL_MS,
 )
 
+GODKEND_STABILISERINGSVENTETID_MS = 1_500
 FORVENTET_OPGAVENAVN = "Opret opfølgningsopgave"
 FORVENTET_MENU_STI = ("Administration", FORVENTET_OPGAVENAVN)
 
@@ -101,7 +102,7 @@ async def opret_opfoelgningsopgave(
     Funktionen er uafhængig af, om checkpointet repræsenterer en genoptaget
     ubehandlet opgave eller en nyoprettet opgave.
 
-    Når ``test=True``, udfyldes og valideres formularen uden klik på Gem.
+    Når ``test=True``, udfyldes og valideres formularen uden klik på Godkend.
     """
 
     if page.is_closed():
@@ -250,19 +251,24 @@ async def opret_opfoelgningsopgave(
         print()
         print("=" * 70)
         print("TESTTILSTAND: OPFØLGNINGSOPGAVEN ER UDFYLDT")
-        print("test=True, så der klikkes ikke på Gem.")
+        print("test=True, så der klikkes ikke på Godkend.")
         print("=" * 70)
     else:
-        gem = await _find_entydig_knap(
+        godkend = await _find_entydig_knap(
             page=page,
-            text="Gem",
+            text="Godkend",
             timeout=timeout,
         )
-        await gem.scroll_into_view_if_needed()
-        await gem.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
-        await _vent_paa_gemt(
+        await godkend.scroll_into_view_if_needed()
+        await godkend.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
+
+        # Giv KY tid til at behandle handlingen og genopbygge DOM'en.
+        await page.wait_for_timeout(GODKEND_STABILISERINGSVENTETID_MS)
+
+        # Opgaven er først verificeret oprettet, når Godkend ikke længere
+        # findes som en synlig og aktiv knap.
+        await _vent_paa_godkend_knap_vaek(
             page=page,
-            gem=gem,
             timeout=timeout,
         )
         gemt = True
@@ -670,27 +676,68 @@ async def _find_entydig_knap(
     )
 
 
-async def _vent_paa_gemt(
+async def _vent_paa_godkend_knap_vaek(
     page: Page,
-    gem: Locator,
     timeout: int,
 ) -> None:
-    """Vent på lukket formular eller vis en valideringsfejl."""
+    """Vent på, at den synlige og aktive Godkend-knap er væk.
 
-    await _vent_paa_opgaveloader(page=page, timeout=timeout)
+    Efter klik får KY først den konfigurerede stabiliseringspause. Denne
+    funktion poller derefter DOM'en og godkender kun oprettelsen, når ingen
+    synlig og aktiv slutknap med teksten ``Godkend`` længere findes.
+    """
+    pattern = re.compile(r"^\s*Godkend\s*$", re.IGNORECASE)
+    elapsed_ms = 0
 
-    try:
-        await gem.wait_for(
-            state="hidden",
-            timeout=min(30_000, timeout),
-        )
-    except PlaywrightTimeoutError as error:
-        validation = await _hent_synlig_validering(page)
-        raise RuntimeError(
-            "Opfølgningsopgaven blev ikke gemt. "
-            f"Synlig validering: {validation or 'ukendt fejl'}"
-        ) from error
+    while elapsed_ms < timeout:
+        if page.is_closed():
+            raise RuntimeError(
+                "KY-siden blev lukket, før opfølgningsopgaven "
+                "kunne verificeres som oprettet."
+            )
 
+        try:
+            candidates = page.locator(
+                "button[type='submit'], input[type='submit'], "
+                "button.btn-submit-form, a.btn-submit-form, "
+                "button[type='button']"
+            )
+            visible_and_enabled = 0
+
+            for index in range(await candidates.count()):
+                candidate = candidates.nth(index)
+                try:
+                    if not await candidate.is_visible():
+                        continue
+                    if not await candidate.is_enabled():
+                        continue
+
+                    value = await candidate.get_attribute("value")
+                    visible_text = _normaliser_tekst(
+                        value or await candidate.inner_text()
+                    )
+                    if pattern.fullmatch(visible_text):
+                        visible_and_enabled += 1
+                except Exception:
+                    # Et detached eller udskiftet element er ikke længere synligt.
+                    continue
+
+            if visible_and_enabled == 0:
+                return
+        except Exception:
+            # KY kan kortvarigt udskifte hele formularens DOM efter klik.
+            # Det er ikke i sig selv et succesbevis, så kontrollen gentages.
+            pass
+
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+
+    validation = await _hent_synlig_validering(page)
+    raise RuntimeError(
+        "Godkend-knappen er stadig synlig og aktiv. "
+        "Opfølgningsopgaven kunne derfor ikke verificeres som oprettet. "
+        f"Synlig validering: {validation or 'ingen synlig validering'}."
+    )
 
 async def _hent_synlig_validering(page: Page) -> str:
     """Returnér synlige valideringsbeskeder fra formularen."""

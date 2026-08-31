@@ -21,6 +21,7 @@ from ..selectors import KYSelectors
 ACTION_TIMEOUT_MS = 30_000
 OPGAVE_TIMEOUT_MS = 120_000
 POLL_INTERVAL_MS = 250
+SEND_STABILIZATION_WAIT_MS = 1_500
 SEND_BREV_MENU_STI = ("Administration", "Send brev")
 
 
@@ -594,21 +595,15 @@ async def godkend_og_send_brev(
     page: Page,
     test: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
+    wait_after_click_ms: int = SEND_STABILIZATION_WAIT_MS,
 ) -> bool:
-    """Godkend og afsend brevet, med sikker testtilstand som standard.
+    """Godkend brevet og verificér, at KY er gået videre.
 
-    Args:
-        page: Den aktive KY-side med en færdigudfyldt Send brev-opgave.
-        test: Når ``True`` klikkes der ikke på Godkend, og brevet sendes ikke.
-            Kun når værdien udtrykkeligt er ``False``, klikkes der på den
-            synlige Godkend-knap.
-        timeout: Maksimal ventetid i millisekunder.
-
-    Returns:
-        ``True`` hvis Godkend-knappen blev klikket, ellers ``False`` i
-        testtilstand.
+    Ved ``test=True`` klikkes der ikke på Godkend. I produktion klikkes
+    der på den eneste synlige og aktive Godkend-knap. Efter klikket får
+    KY en kort stabiliseringspause. Brevet betragtes kun som sendt, når
+    ingen synlig og aktiv Godkend-knap længere findes.
     """
-
     await _bekraeft_send_brev_opgave(page, timeout)
 
     if test:
@@ -619,10 +614,48 @@ async def godkend_og_send_brev(
         print("=" * 70)
         return False
 
+    if wait_after_click_ms < 0:
+        raise ValueError("wait_after_click_ms må ikke være negativ.")
+
     selector = (
         "button[type='button'].btn.btn-primary.submit-opgave.margin-right"
         "[data-href='/opgave/handling/fortsaet']"
     )
+    button = await _find_eneste_aktive_godkend_knap(
+        page=page,
+        selector=selector,
+    )
+
+    print()
+    print("=" * 70)
+    print("PRODUKTIONSTILSTAND: KLIKKER PÅ GODKEND")
+    print("Brevet afsendes nu.")
+    print("=" * 70)
+
+    await button.click(timeout=ACTION_TIMEOUT_MS)
+
+    # Giv KY tid til at behandle handlingen og opdatere DOM'en.
+    if wait_after_click_ms:
+        await page.wait_for_timeout(wait_after_click_ms)
+
+    await _vent_paa_godkend_knap_ikke_synlig(
+        page=page,
+        selector=selector,
+        timeout=timeout,
+    )
+
+    print("Godkend-knappen er ikke længere synlig. Brevet er sendt.")
+    return True
+
+
+async def _find_eneste_aktive_godkend_knap(
+    page: Page,
+    selector: str,
+) -> Locator:
+    """Find præcis én synlig og aktiv Godkend-knap."""
+    if page.is_closed():
+        raise RuntimeError("KY-siden er lukket før brevafsendelse.")
+
     candidates = page.locator(f"{selector}:visible")
     matches: list[Locator] = []
 
@@ -639,51 +672,62 @@ async def godkend_og_send_brev(
         raise PlaywrightTimeoutError(
             "En synlig og aktiv Godkend-knap til Send brev blev ikke fundet."
         )
+
     if len(matches) > 1:
         raise RuntimeError(
             "Flere synlige og aktive Godkend-knapper blev fundet. "
             "Brevet er ikke afsendt."
         )
 
-    button = matches[0]
-    before_url = page.url
+    return matches[0]
 
-    print()
-    print("=" * 70)
-    print("PRODUKTIONSTILSTAND: KLIKKER PÅ GODKEND")
-    print("Brevet afsendes nu.")
-    print("=" * 70)
 
-    await button.click(timeout=ACTION_TIMEOUT_MS)
-
-    # Klikket kan enten navigere, fjerne knappen eller genopbygge opgaven.
-    # Vent derfor på mindst ét stabilt tegn på, at Godkend er behandlet.
+async def _vent_paa_godkend_knap_ikke_synlig(
+    page: Page,
+    selector: str,
+    timeout: int,
+) -> None:
+    """Vent på, at ingen synlig og aktiv Godkend-knap længere findes."""
     elapsed = 0
+
     while elapsed < timeout:
         if page.is_closed():
-            # Browseren kan lukkes af den kaldende proces efter afsendelse.
-            return True
+            raise RuntimeError(
+                "KY-siden blev lukket, før brevafsendelsen kunne verificeres."
+            )
+
+        visible_and_enabled = 0
+        candidates = page.locator(f"{selector}:visible")
 
         try:
-            visible_buttons = page.locator(f"{selector}:visible")
-            button_gone = await visible_buttons.count() == 0
-            url_changed = page.url != before_url
-
-            if button_gone or url_changed:
-                print("Godkend-klikket er behandlet af KY.")
-                return True
+            for index in range(await candidates.count()):
+                candidate = candidates.nth(index)
+                try:
+                    text = _normaliser(await candidate.inner_text())
+                    if (
+                        text.casefold() == "godkend"
+                        and await candidate.is_enabled()
+                    ):
+                        visible_and_enabled += 1
+                except Exception:
+                    # Et udskiftet eller detached element tæller ikke som synligt.
+                    continue
         except Exception:
-            # Navigation eller DOM-udskiftning efter klik tæller som behandlet.
-            return True
+            # Navigation kan kortvarigt udskifte DOM'en. Kontrollér igen i næste poll.
+            await page.wait_for_timeout(POLL_INTERVAL_MS)
+            elapsed += POLL_INTERVAL_MS
+            continue
+
+        if visible_and_enabled == 0:
+            return
 
         await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed += POLL_INTERVAL_MS
 
     raise PlaywrightTimeoutError(
-        "Godkend-knappen blev klikket, men KY viste ikke et tydeligt "
-        "afslutningssignal inden timeout. Kontrollér afsendelsesstatus i KY."
+        "Godkend-knappen er stadig synlig og aktiv efter klik. "
+        "Brevet kunne derfor ikke verificeres som sendt."
     )
-
 
 async def _bekraeft_send_brev_opgave(page: Page, timeout: int) -> None:
     if page.is_closed():

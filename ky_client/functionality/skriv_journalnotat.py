@@ -940,16 +940,32 @@ async def _journalnotat_afslut_opgave(
     page: Page,
     timeout: int,
 ) -> None:
-    """Afslut journalnotatopgaven, men kun når test=False."""
+    """Klik på Godkend og vent på, at KY har fjernet den afsluttede opgave.
 
-    pattern = re.compile(r"^\s*(?:Godkend|Gem)\s*$", re.IGNORECASE)
+    Funktionen anvendes kun, når ``test=False``. Den accepterer kun den
+    konkrete Godkend-knap til afslutning af journalnotatopgaven. En eventuel
+    Gem-knap må ikke bruges som afslutningssignal.
+    """
+
+    if page.is_closed():
+        raise RuntimeError(
+            "KY-siden er lukket, før journalnotatet kan godkendes."
+        )
+
+    selector = (
+        "button[type='button'].btn.btn-primary.submit-opgave.margin-right"
+        "[data-href='/opgave/handling/fortsaet']"
+    )
+    pattern = re.compile(r"^\s*Godkend\s*$", re.IGNORECASE)
     elapsed_ms = 0
 
     while elapsed_ms < timeout:
-        candidates = page.locator(
-            "button[type='button']:visible, button[type='submit']:visible, "
-            "input[type='submit']:visible, a.btn-submit-form:visible"
-        )
+        if page.is_closed():
+            raise RuntimeError(
+                "KY-siden blev lukket, før Godkend-knappen blev fundet."
+            )
+
+        candidates = page.locator(f"{selector}:visible")
         matches: list[Locator] = []
 
         for index in range(await candidates.count()):
@@ -966,54 +982,141 @@ async def _journalnotat_afslut_opgave(
             except Exception:
                 continue
 
+        if len(matches) > 1:
+            raise RuntimeError(
+                "Flere synlige og aktive Godkend-knapper blev fundet. "
+                "Journalnotatet er ikke godkendt."
+            )
+
         if len(matches) == 1:
             button = matches[0]
             before_url = page.url
-            await button.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
+            before_opgave_id = await _journalnotat_hent_aktivt_opgave_id(page)
+
+            print()
+            print("=" * 70, flush=True)
+            print("PRODUKTIONSTILSTAND: KLIKKER PÅ GODKEND", flush=True)
+            print("Journalnotatet afsluttes nu.", flush=True)
+            print("=" * 70, flush=True)
+
+            await button.scroll_into_view_if_needed()
+            await button.click(
+                timeout=min(ACTION_TIMEOUT_MS, timeout)
+            )
+
             await _journalnotat_vent_paa_afslutning(
                 page=page,
                 button=button,
+                button_selector=selector,
                 before_url=before_url,
+                before_opgave_id=before_opgave_id,
                 timeout=timeout,
             )
             return
 
-        if len(matches) > 1:
-            raise RuntimeError(
-                "Flere mulige afslutningsknapper blev fundet. "
-                "Journalnotatet er ikke afsluttet."
-            )
-
         await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
 
-    raise PlaywrightTimeoutError("Journalnotatets afslutningsknap blev ikke fundet.")
+    raise PlaywrightTimeoutError(
+        "En synlig og aktiv Godkend-knap til journalnotatet "
+        "blev ikke fundet inden for tidsgrænsen."
+    )
 
 
 async def _journalnotat_vent_paa_afslutning(
     page: Page,
     button: Locator,
+    button_selector: str,
     before_url: str,
+    before_opgave_id: str,
     timeout: int,
 ) -> None:
-    """Vent på skjult knap, ændret URL eller genopbygget opgave-DOM."""
+    """Vent på et sikkert signal om, at Godkend er behandlet af KY.
+
+    Afslutningen anses som behandlet, når mindst ét af følgende observeres:
+
+    - browserens URL ændres
+    - den klikkede knap bliver skjult eller fjernet
+    - ingen synlig Godkend-knap findes længere
+    - opgaveheaderens dynamiske opgave-id ændres eller forsvinder
+
+    Mønstret svarer til Send brev-flowet, hvor KY kan navigere, fjerne knappen
+    eller genopbygge opgave-DOM'en efter klik på Godkend.
+    """
 
     elapsed_ms = 0
+
     while elapsed_ms < timeout:
         if page.is_closed():
             return
+
         try:
-            if page.url != before_url or not await button.is_visible():
+            url_changed = page.url != before_url
+            godkend_gone = await page.locator(
+                f"{button_selector}:visible"
+            ).count() == 0
+
+            try:
+                clicked_button_gone = not await button.is_visible()
+            except Exception:
+                clicked_button_gone = True
+
+            current_opgave_id = await _journalnotat_hent_aktivt_opgave_id(page)
+            opgave_changed = bool(before_opgave_id) and (
+                not current_opgave_id
+                or current_opgave_id.casefold() != before_opgave_id.casefold()
+            )
+
+            if (
+                url_changed
+                or godkend_gone
+                or clicked_button_gone
+                or opgave_changed
+            ):
+                print(
+                    "Godkend-klikket er behandlet, og journalnotatopgaven "
+                    "er fjernet eller genopbygget af KY.",
+                    flush=True,
+                )
                 return
         except Exception:
+            # Navigation eller en fuld DOM-udskiftning efter klik betyder,
+            # at den tidligere opgave ikke længere kan aflæses.
             return
+
         await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
 
     raise PlaywrightTimeoutError(
-        "Afslutningsknappen blev klikket, men KY viste intet afslutningssignal."
+        "Godkend-knappen blev klikket, men KY viste ikke et tydeligt "
+        "afslutningssignal inden timeout. Kontrollér journalnotatets "
+        "status i KY."
     )
 
+
+async def _journalnotat_hent_aktivt_opgave_id(
+    page: Page,
+) -> str:
+    """Læs det dynamiske opgave-id fra den aktuelle opgaveheader."""
+
+    if page.is_closed():
+        return ""
+
+    buttons = page.locator(
+        "div#opgave-header "
+        "a.undock_panel_button[data-opgave-id]:visible"
+    )
+
+    if await buttons.count() == 0:
+        return ""
+
+    try:
+        return (
+            await buttons.first.get_attribute("data-opgave-id")
+            or ""
+        ).strip()
+    except Exception:
+        return ""
 
 def _journalnotat_input_eller_env(
     value: str | None,
