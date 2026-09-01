@@ -1613,47 +1613,53 @@ async def opstart_opgave(
 def hent_aktivt_opgave_id_fra_item_data(
     item_data: dict[str, Any],
 ) -> str | None:
-    """Udled kun det id, der sikkert kan knyttes til itemet.
+    """Hent kun ID for en procesopgave startet af robotten.
 
-    Prioritet:
-    1. box["Aktiv Opgave-Id"]
-    2. box["Aktiv Opgave URL"]
-    3. box["Opgave-Id"]
-    4. box["URL"]
-    5. box["Original URL"]
-
-    De to foerste noegler skrives af ``opstart_opgave`` efter nyoprettelse.
+    Den oprindelige Modtag post-opgaves ID og URL må ikke
+    bruges til genoptagelse af Send brev, Skriv journalnotat
+    eller Opret opfølgningsopgave.
     """
 
-    if not isinstance(item_data, dict):
-        raise TypeError("item_data skal vaere en dictionary.")
-
-    box = item_data.get("box")
-    if not isinstance(box, dict):
-        raise TypeError("item_data['box'] skal vaere en dictionary.")
-
-    for key in (
-        AKTIV_OPGAVE_ID_KEY,
-        "Opgave-Id",
-        "Opgave-ID",
-        "opgave_id",
-        "opgave-id",
+    if not isinstance(
+        item_data,
+        dict,
     ):
-        id_value = _opstart_normaliser_id(box.get(key))
-        if id_value:
-            return id_value
+        raise TypeError(
+            "item_data skal være en dictionary."
+        )
 
-    for key in (
-        AKTIV_OPGAVE_URL_KEY,
-        "URL",
-        "Original URL",
+    box = item_data.get(
+        "box"
+    )
+
+    if not isinstance(
+        box,
+        dict,
     ):
-        url_value = str(box.get(key) or "").strip()
-        if not url_value:
-            continue
-        id_value = hent_opgave_id_fra_url(url_value)
-        if id_value:
-            return id_value
+        raise TypeError(
+            "item_data['box'] skal være en dictionary."
+        )
+
+    aktivt_opgave_id = _opstart_normaliser_id(
+        box.get(
+            AKTIV_OPGAVE_ID_KEY
+        )
+    )
+
+    if aktivt_opgave_id:
+        return aktivt_opgave_id
+
+    aktiv_opgave_url = str(
+        box.get(
+            AKTIV_OPGAVE_URL_KEY
+        )
+        or ""
+    ).strip()
+
+    if aktiv_opgave_url:
+        return hent_opgave_id_fra_url(
+            aktiv_opgave_url
+        )
 
     return None
 
