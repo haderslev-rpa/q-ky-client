@@ -40,7 +40,7 @@ uv add git+https://github.com/odense-rpa/ky-client
 - **Dokumentupload** — uploader et dokument til en specifik borgersag
 - **Opgavehåndtering** — åbn, godkend, afbryd og rediger individuelle borgeropgaver
 - **Opgaveindbakke** — gennemse opgaveindbakken pr. opgavepakke med paginering
-- **Luk sagsfane** — luk en åben borgersagsfane og håndter dialog om ugemte ændringer
+-ggb **Luk sagsfane** — luk en åben borgersagsfane og håndter dialog om ugemte ændringer
 
 ## Brug
 

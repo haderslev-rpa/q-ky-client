@@ -33,11 +33,131 @@ class KYSelectors:
         LIVSSITUATION = "table#person-overblik-livssituation"
         LÅST_BANNER = 'div[data-textkey="system.type.advarsel_item.reserveret_af"]'
 
+        """Indsæt konstanterne i KYSelectors.Borgere i ky_client/selectors.py."""
+
+        # Tilføj følgende konstanter under KYSelectors.Borgere i selectors.py
+
+        PERSON_TAB = "li.tab.topmenu-tab[data-tab-target-id='PERSON']"
+        PERSON_CLOSE_BUTTON = (
+            "li.tab.topmenu-tab[data-tab-target-id='PERSON'] "
+            ".navigation-close-tab[data-entity-type='PERSON']"
+        )
+        ACTIVE_PERSON_CLOSE_BUTTON = (
+            "li.tab.topmenu-tab.active[data-tab-target-id='PERSON'] "
+            ".navigation-close-tab[data-entity-type='PERSON']"
+        )
+        PERSON_CLOSE_BUTTON_BY_ID = (
+            "li.tab.topmenu-tab[data-tab-target-id='PERSON'] "
+            ".navigation-close-tab[data-entity-type='PERSON']"
+            "[data-entity-id='{entity_id}']"
+        )
+
+        TOP_SEARCH_FALLBACKS = (
+            "input#topsearch",
+            "input[name='topSearch']",
+            "input[name='topsearch']",
+            "input[id*='topsearch' i]",
+            "input[name*='topsearch' i]",
+            "input[class*='topsearch' i]",
+            "input[placeholder*='CPR' i]",
+            "input[aria-label*='CPR' i]",
+            "input[placeholder*='Søg' i]",
+            "input[aria-label*='Søg' i]",
+            "input[type='search']",
+            "[role='searchbox']",
+        )
+        TOP_SEARCH_BUTTON_FALLBACKS = (
+            "div#topSearchBtn",
+            "button#topSearchBtn",
+            "#topSearchBtn button",
+            "#topSearchBtn a",
+            "button[aria-label*='Søg' i]",
+            "button[title*='Søg' i]",
+        )
+
+        OPGAVE_HEADER = "div#opgave-header.block-heading"
+        OPGAVE_HEADER_VISIBLE = "div#opgave-header.block-heading:visible"
+        OPGAVE_UNDOCK_BUTTON = "a.undock_panel_button[data-opgave-id][data-url]"
+        OPGAVE_UNDOCK_READY = (
+            "div#opgave-header "
+            "a.undock_panel_button[data-opgave-id][data-url]"
+        )
+        OPGAVE_HEADER_NAME = ".pull-right > span.margin-right"
+        OPGAVE_LOADERS = (
+            "div#empty_opgave_loader, "
+            "div#opgave_loader, "
+            "div#opgave-loader, "
+            "i#opgave-spinner, "
+            ".table-init-loader:visible"
+        )
+        HANDLINGER_CONTAINER = "li#handlinger-dropdown"
+        HANDLINGER_MENU_ITEMS = "a, button, [role='menuitem']"
+        TABLE_CELLS = "td"
+
+
+
+        # Modtag post: identifikation af opgaven
+        MODTAG_POST_OPGAVENAVN = (
+            "div#opgave-header.block-heading, "
+            "div#opgave-header.block-heading span, "
+            "div.opgave-header, "
+            "div.opgave-header span"
+        )
+
+        # Modtag post: Dokumenter
+        MODTAG_POST_DOKUMENTER_TOGGLE = (
+            "a[data-toggle='collapse'][href='#vedhaeftninger']"
+            ":has(span.panel-title:has-text('Dokumenter'))"
+        )
+        MODTAG_POST_DOKUMENTER_PANEL_CONTAINER = (
+            "xpath=ancestor::div["
+            "contains(concat(' ', normalize-space(@class), ' '), ' panel ')"
+            "][1]"
+        )
+        MODTAG_POST_DOKUMENTER_PANEL = "xpath=.//*[@id='vedhaeftninger']"
+        MODTAG_POST_DOKUMENTER_RAEKKER = "tbody tr.table-row"
+        MODTAG_POST_DOKUMENTER_CELLER = (
+            "td:not(.handlinger), [role='gridcell']"
+        )
+        MODTAG_POST_DOKUMENTER_AABN_LINK = (
+            "a[target='_blank'][href*='aabnPdfDokument']"
+        )
+
+        # Modtag post: sagsvælger
+        MODTAG_POST_SAGSVAELGER_INPUT = (
+            "input#command\\.selectedSagIds.sagsvaelger-input[readonly]"
+        )
+        MODTAG_POST_SAGSVAELGER_SOEG = "input.sagsvaelger-soeg"
+        MODTAG_POST_SAGSVAELGER_AKTIVE = (
+            "input[type='checkbox'][data-tilstand='aktiv']"
+        )
+        MODTAG_POST_SAGSVAELGER_PASSIVE = (
+            "input[type='checkbox'][data-tilstand='passiv']"
+        )
+        MODTAG_POST_SAGSVAELGER_RAEKKER = (
+            "tr.table-row[data-id][data-tilstand]"
+        )
+        MODTAG_POST_SAGSVAELGER_DATA_CELLER = "td:not(.select-row)"
+        MODTAG_POST_SAGSVAELGER_VAELG_CELLE = "td.select-row"
+        MODTAG_POST_SAGSVAELGER_VALGTE_RAEKKER = (
+            "tr.table-row.selected[data-id][data-tilstand], "
+            "tr.table-row[data-id][data-tilstand]:has(td.select-row.selected)"
+        )
+
+        # Modtag post: afslutning
+        MODTAG_POST_GODKEND = (
+            "button[type='button'].btn.btn-primary.submit-opgave.margin-right"
+            "[data-href='/opgave/handling/fortsaet']"
+        )
+
+
+
         # Send brev - opgaveheader og loader
         SEND_BREV_HEADER = (
             "div#opgave-header.block-heading "
             "span[data-textkey='system.type.opgave.send_brev']"
         )
+
         SEND_BREV_HEADER_CONTAINER = "div#opgave-header.block-heading"
         SEND_BREV_UNDOCK_BUTTON = "a.undock_panel_button[data-opgave-id][data-url]"
         SEND_BREV_LOADER = (
