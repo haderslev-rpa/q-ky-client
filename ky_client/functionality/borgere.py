@@ -20,9 +20,24 @@ POLL_INTERVAL_MS = 250
 STABLE_CHECKS = 4
 WAIT_AFTER_TAB_CLOSE_MS = 1_000
 MAX_CLOSE_ATTEMPTS = 3
-AKTIV_OPGAVE_ID_KEY = "Aktiv Opgave-Id"
-AKTIV_OPGAVE_URL_KEY = "Aktiv Opgave URL"
-AKTIV_OPGAVE_NAVN_KEY = "Aktiv Opgavenavn"
+
+CHECKPOINT_FELTER: dict[str, tuple[str, str, str]] = {
+    "send_brev": (
+        "Send brev Opgave-Id",
+        "Send brev Opgave URL",
+        "Send brev Opgavenavn",
+    ),
+    "journalnotat": (
+        "Journalnotat Opgave-Id",
+        "Journalnotat Opgave URL",
+        "Journalnotat Opgavenavn",
+    ),
+    "opfoelgningsopgave": (
+        "Opfølgningsopgave Opgave-Id",
+        "Opfølgningsopgave Opgave URL",
+        "Opfølgningsopgave Opgavenavn",
+    ),
+}
 
 
 class Personoplysning(TypedDict):
@@ -1475,71 +1490,189 @@ class OpstartOpgaveCheckpoint(TypedDict):
 async def opstart_opgave(
     page: Page,
     menu_sti: tuple[str, ...],
+    checkpoint_type: str,
     item_data: dict[str, Any] | None = None,
     opgave_id: str | None = None,
     timeout: int = OPGAVE_TIMEOUT_MS,
 ) -> OpstartOpgaveCheckpoint:
-    """Genoptag itemets ubehandlede opgave eller opret en ny.
+    """
+    Genoptag en tidligere startet KY-opgave eller opret en ny.
 
-    Funktionen leder altid i ``Ubehandlede opgaver`` foer oprettelse.
+    checkpoint_type skal være en af:
 
-    En eksisterende raekke maa kun aabnes, naar alle disse krav er opfyldt:
+    - send_brev
+    - journalnotat
+    - opfoelgningsopgave
 
-    1. Raekkens ``data-id`` matcher itemets gemte aktive opgave-id.
-    2. Linkets ``data-opgave-id`` matcher samme id.
-    3. Opgavenavnet matcher sidste led i ``menu_sti`` eksakt.
+    Hvis item_data["box"] allerede indeholder et checkpoint for den
+    pågældende opgavetype, skal den eksisterende opgave genoptages.
+    Funktionen må i den situation ikke oprette en ny opgave.
 
-    Dermed kan robotten ikke overtage en anden brugers ubehandlede opgave
-    alene fordi opgaven hedder fx ``Skriv journalnotat`` eller ``Send brev``.
-
-    ``opgave_id`` har hoejeste prioritet. Ellers udledes id fra item_data.
-    Ved nyoprettelse gemmes checkpointet i item_data["box"] under de tre
-    ``Aktiv ...``-noegler, saa et senere browserforloeb kan genoptage det.
+    Checkpointet skrives til item_data["box"], men den kaldende proces
+    skal efterfølgende kalde update_item_data(), så ændringerne gemmes
+    permanent på Automation Server.
     """
 
     if page.is_closed():
-        raise RuntimeError("KY-siden er lukket foer opstart af opgave.")
+        raise RuntimeError(
+            "KY-siden er lukket før opstart af opgave."
+        )
+
+    checkpoint_type = _normaliser_checkpoint_type(
+        checkpoint_type
+    )
 
     normaliseret_menu_sti = tuple(
         _opstart_normaliser_tekst(menu_del)
         for menu_del in menu_sti
         if _opstart_normaliser_tekst(menu_del)
     )
+
     if not normaliseret_menu_sti:
-        raise ValueError("menu_sti skal indeholde mindst et menupunkt.")
+        raise ValueError(
+            "menu_sti skal indeholde mindst ét menupunkt."
+        )
 
     forventet_opgavenavn = normaliseret_menu_sti[-1]
-    borger_url = page.url
 
-    aktivt_opgave_id = _opstart_normaliser_id(opgave_id)
-    if aktivt_opgave_id is None and item_data is not None:
-        aktivt_opgave_id = hent_aktivt_opgave_id_fra_item_data(item_data)
+    borger_url = str(
+        page.url or ""
+    ).strip()
 
-    # Der kigges altid i tabellen. Uden et id maa ingen eksisterende raekke
-    # aabnes, fordi opgavenavnet ikke er tilstraekkeligt til ejerskabskontrol.
-    eksisterende_raekke = await find_matchende_ubehandlet_opgave(
-        page=page,
-        forventet_opgave_id=aktivt_opgave_id,
-        forventet_opgavenavn=forventet_opgavenavn,
-        timeout=timeout,
+    if not borger_url:
+        raise RuntimeError(
+            "Borger-URL kunne ikke læses før opstart af opgaven."
+        )
+
+    gemt_checkpoint = hent_opgavecheckpoint_fra_item_data(
+        item_data=item_data,
+        checkpoint_type=checkpoint_type,
     )
 
-    if eksisterende_raekke is not None:
+    eksplicit_opgave_id = _opstart_normaliser_id(
+        opgave_id
+    )
+
+    # Et eksplicit handlingsspecifikt ID har højeste prioritet.
+    if eksplicit_opgave_id is not None:
+        if gemt_checkpoint is None:
+            gemt_checkpoint = {
+                "opgave_id": eksplicit_opgave_id,
+                "opgave_navn": forventet_opgavenavn,
+                "opgave_url": "",
+            }
+        elif (
+            gemt_checkpoint["opgave_id"].casefold()
+            != eksplicit_opgave_id.casefold()
+        ):
+            raise RuntimeError(
+                "Det eksplicitte opgave-id matcher ikke checkpointet "
+                "i item_data. Intet åbnes eller oprettes. "
+                f"Checkpoint-type={checkpoint_type!r}, "
+                f"eksplicit id={eksplicit_opgave_id!r}, "
+                f"gemt id={gemt_checkpoint['opgave_id']!r}."
+            )
+
+    # Hvis der er et gemt checkpoint, må der ikke oprettes en ny opgave.
+    if gemt_checkpoint is not None:
+        gemt_opgave_id = _opstart_normaliser_id(
+            gemt_checkpoint.get("opgave_id")
+        )
+
+        gemt_opgave_url = _opstart_normaliser_tekst(
+            gemt_checkpoint.get("opgave_url", "")
+        )
+
+        gemt_opgavenavn = _opstart_normaliser_tekst(
+            gemt_checkpoint.get("opgave_navn", "")
+        )
+
+        if (
+            gemt_opgavenavn
+            and gemt_opgavenavn.casefold()
+            != forventet_opgavenavn.casefold()
+        ):
+            raise RuntimeError(
+                "Det gemte checkpoint tilhører en anden opgavetype. "
+                "Intet åbnes eller oprettes. "
+                f"Checkpoint-type={checkpoint_type!r}, "
+                f"forventet navn={forventet_opgavenavn!r}, "
+                f"gemt navn={gemt_opgavenavn!r}."
+            )
+
+        if not gemt_opgave_id and gemt_opgave_url:
+            gemt_opgave_id = hent_opgave_id_fra_url(
+                gemt_opgave_url
+            )
+
+        if not gemt_opgave_id:
+            raise RuntimeError(
+                "Der findes et gemt checkpoint, men opgave-id "
+                "mangler og kan ikke udledes fra URL'en. "
+                "Der oprettes ikke en ny opgave. "
+                f"Checkpoint-type={checkpoint_type!r}."
+            )
+
+        if gemt_opgave_url:
+            checkpoint = await genoptag_opgave_fra_checkpoint_url(
+                page=page,
+                opgave_id=gemt_opgave_id,
+                opgave_navn=forventet_opgavenavn,
+                opgave_url=gemt_opgave_url,
+                borger_url=borger_url,
+                menu_sti=normaliseret_menu_sti,
+                timeout=timeout,
+            )
+
+            _gem_opgavecheckpoint_i_item_data(
+                item_data=item_data,
+                checkpoint=checkpoint,
+                checkpoint_type=checkpoint_type,
+            )
+
+            return checkpoint
+
+        # Bagudfald, hvis der findes et ID, men ingen URL.
+        eksisterende_raekke = (
+            await find_matchende_ubehandlet_opgave(
+                page=page,
+                forventet_opgave_id=gemt_opgave_id,
+                forventet_opgavenavn=forventet_opgavenavn,
+                timeout=timeout,
+            )
+        )
+
+        if eksisterende_raekke is None:
+            raise RuntimeError(
+                "Itemet indeholder et gemt opgave-id, men opgaven "
+                "kunne ikke findes blandt Ubehandlede opgaver. "
+                "Der oprettes ikke en ny opgave, da det kan skabe "
+                "en dublet. "
+                f"Checkpoint-type={checkpoint_type!r}, "
+                f"opgave-id={gemt_opgave_id!r}, "
+                f"opgavenavn={forventet_opgavenavn!r}."
+            )
+
         checkpoint = await aabn_matchende_ubehandlet_opgave(
             page=page,
             row=eksisterende_raekke,
-            forventet_opgave_id=aktivt_opgave_id,
+            forventet_opgave_id=gemt_opgave_id,
             forventet_opgavenavn=forventet_opgavenavn,
             borger_url=borger_url,
             menu_sti=normaliseret_menu_sti,
             timeout=timeout,
         )
-        _gem_aktivt_checkpoint_i_item_data(item_data, checkpoint)
+
+        _gem_opgavecheckpoint_i_item_data(
+            item_data=item_data,
+            checkpoint=checkpoint,
+            checkpoint_type=checkpoint_type,
+        )
+
         return checkpoint
 
-    # Hvis itemets aktive id findes i tabellen med et andet opgavenavn,
-    # rejser find_matchende_ubehandlet_opgave allerede en fejl. Kun et sikkert
-    # "ikke fundet" maa falde videre til oprettelse.
+    # Der findes intet gemt checkpoint.
+    # Det er derfor sikkert at oprette en ny opgave.
     nyt_checkpoint = await aabn_opgave_og_hent_url(
         page=page,
         menu_sti=normaliseret_menu_sti,
@@ -1547,81 +1680,362 @@ async def opstart_opgave(
     )
 
     checkpoint: OpstartOpgaveCheckpoint = {
-        "opgave_id": str(nyt_checkpoint["opgave_id"]).strip(),
+        "opgave_id": str(
+            nyt_checkpoint["opgave_id"]
+        ).strip(),
         "opgave_navn": forventet_opgavenavn,
-        "opgave_url": str(nyt_checkpoint["opgave_url"]).strip(),
-        "borger_url": str(nyt_checkpoint["borger_url"]).strip(),
-        "menu_sti": tuple(nyt_checkpoint["menu_sti"]),
+        "opgave_url": str(
+            nyt_checkpoint["opgave_url"]
+        ).strip(),
+        "borger_url": str(
+            nyt_checkpoint["borger_url"]
+        ).strip(),
+        "menu_sti": tuple(
+            nyt_checkpoint["menu_sti"]
+        ),
         "genoptaget": False,
         "kilde": "ny_opgave",
     }
 
     if not checkpoint["opgave_id"]:
-        raise RuntimeError("Den nyoprettede opgave mangler opgave-id.")
-    if checkpoint["opgave_navn"].casefold() != forventet_opgavenavn.casefold():
+        raise RuntimeError(
+            "Den nyoprettede opgave mangler opgave-id."
+        )
+
+    if not checkpoint["opgave_url"]:
+        raise RuntimeError(
+            "Den nyoprettede opgave mangler opgave-URL."
+        )
+
+    if (
+        checkpoint["opgave_navn"].casefold()
+        != forventet_opgavenavn.casefold()
+    ):
         raise RuntimeError(
             "Den nyoprettede opgaves navn matcher ikke menu_sti. "
             f"Forventet={forventet_opgavenavn!r}, "
             f"faktisk={checkpoint['opgave_navn']!r}."
         )
 
-    _gem_aktivt_checkpoint_i_item_data(item_data, checkpoint)
+    _gem_opgavecheckpoint_i_item_data(
+        item_data=item_data,
+        checkpoint=checkpoint,
+        checkpoint_type=checkpoint_type,
+    )
+
     return checkpoint
 
 
-def hent_aktivt_opgave_id_fra_item_data(
-    item_data: dict[str, Any],
-) -> str | None:
-    """Hent kun ID for en procesopgave startet af robotten.
+def _normaliser_checkpoint_type(
+    checkpoint_type: str,
+) -> str:
+    """Validér og normalisér navnet på checkpointtypen."""
 
-    Den oprindelige Modtag post-opgaves ID og URL må ikke
-    bruges til genoptagelse af Send brev, Skriv journalnotat
-    eller Opret opfølgningsopgave.
+    result = str(
+        checkpoint_type or ""
+    ).strip().casefold()
+
+    if result not in CHECKPOINT_FELTER:
+        raise ValueError(
+            "checkpoint_type skal være en af: "
+            + ", ".join(CHECKPOINT_FELTER)
+            + f". Modtog {checkpoint_type!r}."
+        )
+
+    return result
+
+
+def _checkpoint_feltnavne(
+    checkpoint_type: str,
+) -> tuple[str, str, str]:
+    """Returnér ID-, URL- og navnefelt for checkpointtypen."""
+
+    checkpoint_type = _normaliser_checkpoint_type(
+        checkpoint_type
+    )
+
+    return CHECKPOINT_FELTER[checkpoint_type]
+
+
+def hent_opgavecheckpoint_fra_item_data(
+    item_data: dict[str, Any] | None,
+    checkpoint_type: str,
+) -> dict[str, str] | None:
+    """
+    Hent et handlingsspecifikt checkpoint fra item_data["box"].
+
+    Hvis ingen af de tre felter er udfyldt, returneres None.
+    Hvis checkpointet er delvist udfyldt, returneres de fundne data,
+    så opstart_opgave kan validere eller udlede manglende ID fra URL.
     """
 
-    if not isinstance(
-        item_data,
-        dict,
-    ):
+    if item_data is None:
+        return None
+
+    if not isinstance(item_data, dict):
         raise TypeError(
             "item_data skal være en dictionary."
         )
 
-    box = item_data.get(
-        "box"
-    )
+    box = item_data.get("box")
 
-    if not isinstance(
-        box,
-        dict,
-    ):
+    if not isinstance(box, dict):
         raise TypeError(
             "item_data['box'] skal være en dictionary."
         )
 
-    aktivt_opgave_id = _opstart_normaliser_id(
-        box.get(
-            AKTIV_OPGAVE_ID_KEY
-        )
+    id_key, url_key, navn_key = _checkpoint_feltnavne(
+        checkpoint_type
     )
 
-    if aktivt_opgave_id:
-        return aktivt_opgave_id
-
-    aktiv_opgave_url = str(
-        box.get(
-            AKTIV_OPGAVE_URL_KEY
-        )
-        or ""
+    opgave_id = str(
+        box.get(id_key) or ""
     ).strip()
 
-    if aktiv_opgave_url:
-        return hent_opgave_id_fra_url(
-            aktiv_opgave_url
+    opgave_url = str(
+        box.get(url_key) or ""
+    ).strip()
+
+    opgave_navn = _opstart_normaliser_tekst(
+        box.get(navn_key) or ""
+    )
+
+    if not any(
+        (
+            opgave_id,
+            opgave_url,
+            opgave_navn,
+        )
+    ):
+        return None
+
+    return {
+        "opgave_id": opgave_id,
+        "opgave_url": opgave_url,
+        "opgave_navn": opgave_navn,
+    }
+
+
+def _gem_opgavecheckpoint_i_item_data(
+    item_data: dict[str, Any] | None,
+    checkpoint: OpstartOpgaveCheckpoint,
+    checkpoint_type: str,
+) -> None:
+    """
+    Gem checkpointet under handlingsspecifikke felter i box.
+
+    Funktionen ændrer dictionaryen i hukommelsen. Den kaldende proces
+    skal bagefter kalde update_item_data().
+    """
+
+    if item_data is None:
+        return
+
+    if not isinstance(item_data, dict):
+        raise TypeError(
+            "item_data skal være en dictionary."
         )
 
-    return None
+    box = item_data.get("box")
 
+    if not isinstance(box, dict):
+        raise TypeError(
+            "item_data['box'] skal være en dictionary."
+        )
+
+    id_key, url_key, navn_key = _checkpoint_feltnavne(
+        checkpoint_type
+    )
+
+    opgave_id = _opstart_normaliser_id(
+        checkpoint.get("opgave_id")
+    )
+
+    opgave_url = _opstart_normaliser_tekst(
+        checkpoint.get("opgave_url", "")
+    )
+
+    opgave_navn = _opstart_normaliser_tekst(
+        checkpoint.get("opgave_navn", "")
+    )
+
+    if not opgave_id:
+        raise RuntimeError(
+            "Checkpointet mangler opgave-id."
+        )
+
+    if not opgave_url:
+        raise RuntimeError(
+            "Checkpointet mangler opgave-URL."
+        )
+
+    if not opgave_navn:
+        raise RuntimeError(
+            "Checkpointet mangler opgavenavn."
+        )
+
+    box[id_key] = opgave_id
+    box[url_key] = opgave_url
+    box[navn_key] = opgave_navn
+
+async def genoptag_opgave_fra_checkpoint_url(
+    page: Page,
+    opgave_id: str,
+    opgave_navn: str,
+    opgave_url: str,
+    borger_url: str,
+    menu_sti: tuple[str, ...],
+    timeout: int = OPGAVE_TIMEOUT_MS,
+) -> OpstartOpgaveCheckpoint:
+    """
+    Genoptag en opgave direkte fra en tidligere gemt URL.
+
+    Hvis checkpointet findes, må denne funktion ikke oprette en ny
+    opgave. En fejl under navigation eller validering sendes derfor
+    videre til processen.
+    """
+
+    if page.is_closed():
+        raise RuntimeError(
+            "KY-siden er lukket før genoptagelse af opgaven."
+        )
+
+    opgave_id = _opstart_normaliser_id(
+        opgave_id
+    )
+
+    if not opgave_id:
+        raise ValueError(
+            "opgave_id må ikke være tomt."
+        )
+
+    opgave_navn = _opstart_kraev_tekst(
+        opgave_navn,
+        "opgave_navn",
+    )
+
+    opgave_url = _opstart_kraev_tekst(
+        opgave_url,
+        "opgave_url",
+    )
+
+    borger_url = _opstart_kraev_tekst(
+        borger_url,
+        "borger_url",
+    )
+
+    url_opgave_id = hent_opgave_id_fra_url(
+        opgave_url
+    )
+
+    if not url_opgave_id:
+        raise RuntimeError(
+            "Det gemte checkpoint indeholder en URL, men "
+            "opgave-id kunne ikke udledes fra URL'en. "
+            f"URL={opgave_url!r}."
+        )
+
+    if (
+        url_opgave_id.casefold()
+        != opgave_id.casefold()
+    ):
+        raise RuntimeError(
+            "Det gemte opgave-id matcher ikke opgave-id'et "
+            "i den gemte URL. Intet åbnes. "
+            f"Gemt id={opgave_id!r}, "
+            f"URL-id={url_opgave_id!r}."
+        )
+
+    person_id = _hent_person_id_fra_borger_url(
+        opgave_url
+    )
+
+    if not person_id:
+        person_id = _hent_person_id_fra_borger_url(
+            borger_url
+        )
+
+    if not person_id:
+        raise RuntimeError(
+            "Hverken opgave-URL eller borger-URL indeholder "
+            "et gyldigt pId. Opgaven kan ikke genoptages sikkert."
+        )
+
+    destination_url = _byg_opgave_overblik_url(
+        borger_url=borger_url,
+        person_id=person_id,
+        opgave_id=opgave_id,
+    )
+
+    print(
+        "Genoptager opgave fra gemt checkpoint: "
+        f"{destination_url}",
+        flush=True,
+    )
+
+    try:
+        response = await page.goto(
+            destination_url,
+            wait_until="domcontentloaded",
+            timeout=timeout,
+        )
+    except PlaywrightTimeoutError as error:
+        raise PlaywrightTimeoutError(
+            "Navigation til den gemte KY-opgave fik timeout. "
+            "Der oprettes ikke en ny opgave. "
+            f"Opgave-id={opgave_id!r}, "
+            f"URL={destination_url!r}."
+        ) from error
+    except PlaywrightError as error:
+        raise RuntimeError(
+            "Den gemte KY-opgave kunne ikke åbnes. "
+            "Der oprettes ikke en ny opgave. "
+            f"Opgave-id={opgave_id!r}, "
+            f"URL={destination_url!r}, "
+            f"fejl={error}."
+        ) from error
+
+    if response is not None and response.status >= 400:
+        raise RuntimeError(
+            "Den gemte KY-opgave returnerede en HTTP-fejl. "
+            "Der oprettes ikke en ny opgave. "
+            f"Status={response.status}, "
+            f"URL={destination_url!r}."
+        )
+
+    await _vent_paa_opgave_overblik_url(
+        page=page,
+        forventet_person_id=person_id,
+        forventet_opgave_id=opgave_id,
+        timeout=timeout,
+    )
+
+    return {
+        "opgave_id": opgave_id,
+        "opgave_navn": opgave_navn,
+        "opgave_url": page.url,
+        "borger_url": borger_url,
+        "menu_sti": menu_sti,
+        "genoptaget": True,
+        "kilde": "gemt_checkpoint_url",
+    }
+
+def _modtag_post_normaliser_tekst(value: Any) -> str:
+    """Saml whitespace og trim tekst."""
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _opstart_normaliser_id(
+    value: Any,
+) -> str | None:
+    """Trim et opgave-id uden at ændre id-værdien."""
+
+    if value is None:
+        return None
+
+    result = str(value).strip()
+
+    return result or None
 
 def hent_opgave_id_fra_url(url: str) -> str | None:
     """Udled opgave-id fra kendte query-parametre eller KY-stier."""
@@ -2014,35 +2428,6 @@ async def _gaa_til_naeste_ubehandlede_side(
         return False
 
     return True
-
-
-def _gem_aktivt_checkpoint_i_item_data(
-    item_data: dict[str, Any] | None,
-    checkpoint: OpstartOpgaveCheckpoint,
-) -> None:
-    """Gem genoptagelsesdata i box uden at overskrive oprindelig URL."""
-
-    if item_data is None:
-        return
-    if not isinstance(item_data, dict):
-        raise TypeError("item_data skal vaere en dictionary.")
-
-    box = item_data.get("box")
-    if not isinstance(box, dict):
-        raise TypeError("item_data['box'] skal vaere en dictionary.")
-
-    box[AKTIV_OPGAVE_ID_KEY] = checkpoint["opgave_id"]
-    box[AKTIV_OPGAVE_URL_KEY] = checkpoint["opgave_url"]
-    box[AKTIV_OPGAVE_NAVN_KEY] = checkpoint["opgave_navn"]
-
-
-def _opstart_normaliser_id(value: Any) -> str | None:
-    """Trim et opgave-id uden at aendre id-vaerdien."""
-
-    if value is None:
-        return None
-    result = str(value).strip()
-    return result or None
 
 
 def _opstart_kraev_tekst(value: str, field_name: str) -> str:
@@ -3330,6 +3715,3 @@ def _modtag_post_sag_matcher(
     return wanted == actual_id or wanted in actual_text
 
 
-def _modtag_post_normaliser_tekst(value: Any) -> str:
-    """Saml whitespace og trim tekst."""
-    return re.sub(r"\s+", " ", str(value or "")).strip()
