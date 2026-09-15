@@ -2493,6 +2493,18 @@ def _normaliser_tekst(value: str) -> str:
 # ---------------------------------------------------------------------------
 # Modtag post: Dokument, sag og godkendelse
 # ---------------------------------------------------------------------------
+class ModtagPostDokumentResultat(TypedDict):
+    """Resultat fra søgning efter et dokument på en Modtag post-opgave."""
+
+    dokument: str
+    fundet: bool
+    aaben_dokument: bool
+    dokument_aabnet: bool
+    dokumenttekst: str
+    dokument_url: str
+    aabnet_url: str
+
+
 class ModtagPostResultat(TypedDict):
     """Samlet resultat fra ``modtag_post()``."""
 
@@ -2520,6 +2532,49 @@ class ValgtSag(TypedDict):
 
     sag_id: str
     sagstekst: str
+
+
+async def modtag_post_dokument(
+    page: Page,
+    opgave_url: str,
+    dokument: str,
+    aaben_dokument: bool = False,
+    timeout: int = OPGAVE_TIMEOUT_MS,
+) -> ModtagPostDokumentResultat:
+    """Find og åbn eventuelt et dokument på en Modtag post-opgave.
+
+    Hvis søgekriteriet ikke matcher en dokumentrække, returnerer funktionen
+    ``fundet=False`` og tomme dokumentfelter. Manglende søgeresultat er dermed
+    et normalt resultat og ikke en fejl.
+    """
+
+    resultat = await modtag_post(
+        page=page,
+        opgave_url=opgave_url,
+        dokument=dokument,
+        aaben_dokument=aaben_dokument,
+        timeout=timeout,
+    )
+
+    dokument_resultat: ModtagPostDokumentResultat = {
+        "dokument": resultat["dokument"],
+        "fundet": resultat["fundet"],
+        "aaben_dokument": resultat["aaben_dokument"],
+        "dokument_aabnet": resultat["dokument_aabnet"],
+        "dokumenttekst": resultat["dokumenttekst"],
+        "dokument_url": resultat["dokument_url"],
+        "aabnet_url": resultat["aabnet_url"],
+    }
+
+    if not dokument_resultat["fundet"]:
+        besked = (
+            "Ingen dokumenter matchede søgekriteriet "
+            f"{dokument_resultat['dokument']!r}."
+        )
+        logger.info(besked)
+        print(besked, flush=True)
+
+    return dokument_resultat
 
 
 async def modtag_post(
@@ -2762,7 +2817,9 @@ async def _modtag_post_behandl_dokument(
     )
 
     if matchende_raekke is None:
-        logger.info("Dokument blev ikke fundet. Kriterium=%r.", dokument)
+        besked = f"Ingen dokumenter matchede søgekriteriet {dokument!r}."
+        logger.info(besked)
+        print(besked, flush=True)
         return {
             "fundet": False,
             "dokument_aabnet": False,
