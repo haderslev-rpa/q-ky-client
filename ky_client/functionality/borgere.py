@@ -593,51 +593,157 @@ async def _luk_faner_aabnet_under_forsog(
             )
 
 
-async def luk_borgerfane(
+async def luk_borgerfaner(
     page: Page,
-    entity_id: str,
-    timeout_ms: int,
+    entity_ids: Sequence[str],
+    timeout_ms: int = ACTION_TIMEOUT_MS,
+    maks_forsog: int = MAX_CLOSE_ATTEMPTS,
+    vent_efter_gennemloeb_ms: int = WAIT_AFTER_TAB_CLOSE_MS,
 ) -> None:
-    """Luk én PERSON-fane og vent på, at fanen forsvinder."""
-    selector = KYSelectors.Borgere.PERSON_CLOSE_BUTTON_BY_ID.format(
-        entity_id=entity_id
+    """Luk de angivne PERSON-faner robust og vær lydløs ved succes.
+
+    Fanerne lukkes én ad gangen, fordi KY genopbygger fanemenuens DOM
+    efter hver lukning. Midlertidige fejl gemmes uden at blive udskrevet.
+    Der rejses kun en samlet fejl, hvis faner stadig er åbne efter alle
+    lukkeforsøg.
+    """
+    if page.is_closed():
+        raise RuntimeError(
+            "KY-siden er lukket før lukning af PERSON-faner."
+        )
+
+    if not isinstance(timeout_ms, int):
+        raise TypeError(
+            "timeout_ms skal være et heltal."
+        )
+
+    if timeout_ms <= 0:
+        raise ValueError(
+            "timeout_ms skal være større end 0."
+        )
+
+    if not isinstance(maks_forsog, int):
+        raise TypeError(
+            "maks_forsog skal være et heltal."
+        )
+
+    if maks_forsog < 1:
+        raise ValueError(
+            "maks_forsog skal være mindst 1."
+        )
+
+    if not isinstance(vent_efter_gennemloeb_ms, int):
+        raise TypeError(
+            "vent_efter_gennemloeb_ms skal være et heltal."
+        )
+
+    if vent_efter_gennemloeb_ms < 0:
+        raise ValueError(
+            "vent_efter_gennemloeb_ms må ikke være negativ."
+        )
+
+    wanted_ids = list(
+        dict.fromkeys(
+            str(entity_id).strip()
+            for entity_id in entity_ids
+            if str(entity_id).strip()
+        )
     )
-    button = page.locator(selector).first
-    if await button.count() == 0:
+
+    if not wanted_ids:
         return
 
-    await button.scroll_into_view_if_needed()
-    await button.click(timeout=min(30_000, timeout_ms))
-    await page.wait_for_timeout(300)
+    seneste_fejl: dict[str, str] = {}
 
-    # Håndter kendte dialoger med åbne opgaver.
-    dialog_selectors = (
-        KYSelectors.Borgere.AFBRYD_OPGAVE_AFBRYD_OG_GEM,
-        KYSelectors.Borgere.LUK_ALLE_OPGAVER_AFBRYD_OG_GEM,
-    )
-    for dialog_selector in dialog_selectors:
-        try:
-            candidates = page.locator(f"{dialog_selector}:visible")
-            if await candidates.count() > 0:
-                candidate = candidates.first
-                if await candidate.is_enabled():
-                    await candidate.click(timeout=min(30_000, timeout_ms))
-                    break
-        except PlaywrightError:
-            continue
+    for _ in range(maks_forsog):
+        if page.is_closed():
+            raise RuntimeError(
+                "KY-siden blev lukket under lukning af "
+                "PERSON-faner."
+            )
 
-    elapsed_ms = 0
-    while elapsed_ms < timeout_ms:
-        if await page.locator(selector).count() == 0:
-            print(f"PERSON-fanen blev lukket: {entity_id}")
+        open_ids = set(
+            await hent_person_tab_ids(page)
+        )
+
+        remaining_ids = [
+            entity_id
+            for entity_id in wanted_ids
+            if entity_id in open_ids
+        ]
+
+        if not remaining_ids:
             return
-        await page.wait_for_timeout(250)
-        elapsed_ms += 250
 
-    raise PlaywrightTimeoutError(
-        f"PERSON-fanen blev ikke lukket inden for tidsgrænsen. Entity-id={entity_id}."
+        # Luk fanerne én ad gangen og genfind knappen før hvert klik,
+        # fordi KY genopbygger fanemenuens DOM efter en lukning.
+        for entity_id in remaining_ids:
+            if page.is_closed():
+                raise RuntimeError(
+                    "KY-siden blev lukket under lukning af "
+                    f"PERSON-fanen {entity_id!r}."
+                )
+
+            try:
+                await luk_borgerfane(
+                    page=page,
+                    entity_id=entity_id,
+                    timeout_ms=timeout_ms,
+                )
+
+                seneste_fejl.pop(
+                    entity_id,
+                    None,
+                )
+
+            except PlaywrightError as error:
+                # Et senere gennemløb kan stadig lykkes. Fejlen
+                # gemmes derfor uden udskrift.
+                seneste_fejl[entity_id] = (
+                    f"{type(error).__name__}: {error}"
+                )
+
+        if vent_efter_gennemloeb_ms:
+            await page.wait_for_timeout(
+                vent_efter_gennemloeb_ms
+            )
+
+    if page.is_closed():
+        raise RuntimeError(
+            "KY-siden blev lukket, før resultatet af "
+            "fanelukningen kunne verificeres."
+        )
+
+    open_ids = set(
+        await hent_person_tab_ids(page)
     )
 
+    remaining_ids = [
+        entity_id
+        for entity_id in wanted_ids
+        if entity_id in open_ids
+    ]
+
+    if not remaining_ids:
+        return
+
+    fejlbeskrivelser = {
+        entity_id: seneste_fejl.get(
+            entity_id,
+            (
+                "Fanen er stadig åben uden en registreret "
+                "Playwright-fejl."
+            ),
+        )
+        for entity_id in remaining_ids
+    }
+
+    raise AssertionError(
+        "Det lykkedes ikke at lukke alle PERSON-faner efter "
+        f"{maks_forsog} forsøg. "
+        f"Resterende entity-id'er: {remaining_ids!r}. "
+        f"Seneste fejl: {fejlbeskrivelser!r}."
+    )
 
 def _hent_person_id_fra_borger_url(url: str) -> str:
     """Returnér en gyldig UUID fra URL'ens pId, ellers en tom streng."""
