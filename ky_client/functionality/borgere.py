@@ -593,6 +593,42 @@ async def _luk_faner_aabnet_under_forsog(
             )
 
 
+
+async def luk_borgerfane(
+    page: Page,
+    entity_id: str,
+    timeout_ms: int = ACTION_TIMEOUT_MS,
+) -> None:
+    """Luk kun PERSON-fanen med det angivne entity-id og kontrollér resultatet."""
+    if page.is_closed():
+        raise RuntimeError("KY-siden er lukket før lukning af PERSON-fanen.")
+    entity_id = str(entity_id or "").strip()
+    if not entity_id:
+        raise ValueError("entity_id må ikke være tomt.")
+    if not isinstance(timeout_ms, int) or timeout_ms <= 0:
+        raise ValueError("timeout_ms skal være et positivt heltal.")
+
+    # Find knappen på ny, da KY genopbygger fanemenuen efter hvert klik.
+    buttons = page.locator(KYSelectors.Borgere.PERSON_CLOSE_BUTTON)
+    matches: list[Locator] = []
+    for index in range(await buttons.count()):
+        button = buttons.nth(index)
+        if (await button.get_attribute("data-entity-id") or "").strip() == entity_id:
+            matches.append(button)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Forventede præcis én PERSON-lukknap for {entity_id!r}; "
+            f"fandt {len(matches)}. Ingen fane blev lukket."
+        )
+    button = matches[0]
+    await button.wait_for(state="visible", timeout=timeout_ms)
+    if not await button.is_enabled():
+        raise RuntimeError(f"PERSON-lukknappen for {entity_id!r} er ikke aktiv.")
+    await button.click(timeout=timeout_ms)
+    await haandter_eventuel_lukke_dialog(page)
+    await vent_paa_person_fane_lukket(page, entity_id, timeout_ms)
+
+
 async def luk_borgerfaner(
     page: Page,
     entity_ids: Sequence[str],
@@ -1200,78 +1236,6 @@ async def vent_paa_minimum_person_tabs(
         f"men fandt {len(current_ids)}. "
         f"Fundne entity-id'er: {current_ids}"
     )
-
-
-async def luk_borgerfaner(
-    page: Page,
-    entity_ids: Sequence[str],
-    timeout_ms: int = ACTION_TIMEOUT_MS,
-    maks_forsog: int = MAX_CLOSE_ATTEMPTS,
-    vent_efter_gennemloeb_ms: int = WAIT_AFTER_TAB_CLOSE_MS,
-) -> None:
-    """Luk de angivne PERSON-faner robust og verificér resultatet."""
-
-    if maks_forsog < 1:
-        raise ValueError("maks_forsog skal være mindst 1.")
-
-    wanted_ids = list(
-        dict.fromkeys(
-            str(entity_id).strip() for entity_id in entity_ids if str(entity_id).strip()
-        )
-    )
-
-    if not wanted_ids:
-        return
-
-    for attempt in range(
-        1,
-        maks_forsog + 1,
-    ):
-        open_ids = set(await hent_person_tab_ids(page))
-
-        remaining_ids = [entity_id for entity_id in wanted_ids if entity_id in open_ids]
-
-        if not remaining_ids:
-            print(
-                "Alle borgerfaner er lukket.",
-                flush=True,
-            )
-            return
-
-        print(
-            f"Lukkeforsøg {attempt}/{maks_forsog}. "
-            f"Resterende faner: {len(remaining_ids)}",
-            flush=True,
-        )
-
-        # Luk fanerne én ad gangen. Genfind knappen før hvert klik,
-        # da KY genopbygger fanemenuen efter lukningen.
-        for entity_id in remaining_ids:
-            try:
-                await luk_borgerfane(
-                    page=page,
-                    entity_id=entity_id,
-                    timeout_ms=timeout_ms,
-                )
-            except PlaywrightError as error:
-                print(
-                    "Kunne ikke lukke PERSON-fane "
-                    f"{entity_id}: "
-                    f"{type(error).__name__}: {error}",
-                    flush=True,
-                )
-
-        await page.wait_for_timeout(vent_efter_gennemloeb_ms)
-
-    open_ids = set(await hent_person_tab_ids(page))
-
-    remaining_ids = [entity_id for entity_id in wanted_ids if entity_id in open_ids]
-
-    if remaining_ids:
-        raise AssertionError(
-            "Det lykkedes ikke at lukke alle borgerfaner. "
-            f"Resterende entity-id'er: {remaining_ids}"
-        )
 
 
 async def haandter_eventuel_lukke_dialog(
@@ -3876,5 +3840,3 @@ def _modtag_post_sag_matcher(
     actual_id = _modtag_post_normaliser_tekst(sag_id).casefold()
     actual_text = _modtag_post_normaliser_tekst(sagstekst).casefold()
     return wanted == actual_id or wanted in actual_text
-
-
