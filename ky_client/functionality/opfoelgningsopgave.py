@@ -17,6 +17,7 @@ Eksempel::
     resultat = await opret_opfoelgningsopgave(
         page=page,
         checkpoint=checkpoint,
+        sag="HTF-...",  # Konkret SagsID fra den aktuelle borgers sag.
         opfoelgningstype="Brugerdefineret",
         opfoelgningsdato="01-09-2026",
         sagsbehandler="Navn",
@@ -93,6 +94,9 @@ async def opret_opfoelgningsopgave(
     haendelsestype: str | None = None,
     beskrivelse: str | None = None,
     vaelg_sagsbehandler_fra_typeahead: bool = False,
+    sag: str | None = None,
+    aktive_sager: bool = True,
+    passive_sager: bool = False,
     test: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
 ) -> OpfoelgningsopgaveResultat:
@@ -142,6 +146,10 @@ async def opret_opfoelgningsopgave(
     )
 
     await _vent_paa_opgaveloader(page=page, timeout=timeout)
+    await _aabn_opfoelgningsformular(
+        page=page, sag=sag, aktive_sager=aktive_sager,
+        passive_sager=passive_sager, timeout=timeout,
+    )
     await _vent_paa_formular(page=page, timeout=timeout)
 
     await _vaelg_option_via_value_eller_label(
@@ -365,6 +373,223 @@ def _valider_checkpoint(
         "genoptaget": genoptaget,
         "kilde": kilde,
     }
+
+
+# START: Erstat _aabn_opfoelgningsformular() i
+# ky_client/functionality/opfoelgningsopgave.py
+async def _aabn_opfoelgningsformular(
+    page: Page,
+    sag: str | None,
+    aktive_sager: bool,
+    passive_sager: bool,
+    timeout: int,
+) -> None:
+    """Vælg den forventede sag på første trin og åbn formularen.
+
+    Hvis opfølgningsformularen allerede er synlig, ændres intet.
+    Ingen sag vælges ved manglende eller tvetydigt SagsID.
+    """
+    formular = page.locator("select#opfoelgningsType:visible")
+    if await formular.count() > 0:
+        return
+
+    if not sag or not _normaliser_tekst(sag):
+        raise ValueError(
+            "Sagsvælgeren vises før formularen. Angiv sag= med "
+            "borgerens konkrete SagsID."
+        )
+    if not aktive_sager and not passive_sager:
+        raise ValueError("Mindst én sagsstatus skal vælges.")
+
+    # Bekræftet ud fra HTML'en for feltet "Ingen sager valgt".
+    inputs = page.locator(
+        'input[id="command.sagsId.valueString"]'
+        ".sagsvaelger-input[readonly]:visible"
+    )
+    await inputs.first.wait_for(state="visible", timeout=timeout)
+    if await inputs.count() != 1:
+        raise RuntimeError(
+            "Forventede præcis ét synligt input til sagsvælgeren."
+        )
+    field = inputs.first
+
+    # Den følgende container- og menustruktur er endnu ikke bekræftet
+    # for opfølgningsopgaven. Stop sikkert, hvis den ikke matcher.
+    root = field.locator(
+        "xpath=ancestor::div["
+        "contains(concat(' ', normalize-space(@class), ' '), "
+        "' sagsvaelger ')][1]"
+    )
+    if await root.count() != 1:
+        raise RuntimeError(
+            "Inputfeltet blev fundet, men sagsvælgerens "
+            "container kunne ikke identificeres entydigt."
+        )
+
+    menu = root.locator("div.sagsvaelger-list.dropdown-menu")
+    if await menu.count() != 1:
+        raise RuntimeError(
+            "Inputfeltet blev fundet, men sagsvælgerens "
+            "dropdown-menu kunne ikke identificeres entydigt."
+        )
+
+    if not await menu.is_visible():
+        toggle = root.locator(
+            "div.dropdown-toggle[data-toggle='dropdown']"
+        )
+        if await toggle.count() != 1:
+            raise RuntimeError(
+                "Sagsvælgerens åbn-knap er ikke entydig."
+            )
+        await toggle.click(
+            timeout=min(ACTION_TIMEOUT_MS, timeout)
+        )
+
+    await menu.wait_for(state="visible", timeout=timeout)
+
+    for status, checked in (
+        ("aktiv", aktive_sager),
+        ("passiv", passive_sager),
+    ):
+        checkbox = menu.locator(
+            f"input[type='checkbox'][data-tilstand='{status}']"
+        )
+        if await checkbox.count() != 1:
+            raise RuntimeError(
+                f"Checkboxen for {status} sag er ikke entydig."
+            )
+        await checkbox.set_checked(
+            checked,
+            timeout=min(ACTION_TIMEOUT_MS, timeout),
+        )
+
+    search = menu.locator("input.sagsvaelger-soeg:visible")
+    if await search.count() != 1:
+        raise RuntimeError(
+            "Sagsvælgerens søgefelt er ikke entydigt."
+        )
+    await search.fill(sag)
+    await search.dispatch_event("input")
+    await search.dispatch_event("keyup")
+
+    table = menu.locator("table:visible")
+    await table.first.wait_for(state="visible", timeout=timeout)
+    if await table.count() != 1:
+        raise RuntimeError(
+            "Sagsvælgerens resultattabel er ikke entydig."
+        )
+    table = table.first
+
+    header_cells = table.locator("thead th")
+    headers = [
+        _normaliser_tekst(
+            await header_cells.nth(i).inner_text()
+        ).casefold()
+        for i in range(await header_cells.count())
+    ]
+    if headers.count("sagsid") != 1:
+        raise RuntimeError(
+            "Sagsvælgeren mangler en entydig SagsID-kolonne."
+        )
+    sags_id_index = headers.index("sagsid")
+    forventet_sags_id = _normaliser_tekst(sag).casefold()
+
+    matchende_raekker: list[Locator] = []
+    elapsed_ms = 0
+
+    while elapsed_ms < timeout:
+        matchende_raekker.clear()
+        rows = table.locator("tbody tr.table-row:visible")
+
+        for i in range(await rows.count()):
+            row = rows.nth(i)
+            cells = row.locator("td")
+            if await cells.count() != len(headers):
+                raise RuntimeError(
+                    "Sagsrækkens kolonner matcher ikke overskrifterne."
+                )
+
+            faktisk_sags_id = _normaliser_tekst(
+                await cells.nth(sags_id_index).inner_text()
+            ).casefold()
+            if faktisk_sags_id == forventet_sags_id:
+                matchende_raekker.append(row)
+
+        if len(matchende_raekker) > 1:
+            raise RuntimeError(
+                "Flere synlige sager har det forventede SagsID. "
+                "Ingen sag vælges."
+            )
+        if matchende_raekker:
+            break
+
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+
+    if not matchende_raekker:
+        raise PlaywrightTimeoutError(
+            "Fandt ikke det forventede SagsID i sagsvælgeren."
+        )
+
+    row = matchende_raekker[0]
+    status = _normaliser_tekst(
+        await row.get_attribute("data-tilstand") or ""
+    ).casefold()
+    if status not in {"aktiv", "passiv"} or not (
+        (status == "aktiv" and aktive_sager)
+        or (status == "passiv" and passive_sager)
+    ):
+        raise RuntimeError(
+            "Sagen har ukendt eller fravalgt status. "
+            "Ingen sag vælges."
+        )
+
+    if "selected" not in (
+        await row.get_attribute("class") or ""
+    ).split():
+        valg_celle = row.locator("td.select-row")
+        if await valg_celle.count() != 1:
+            raise RuntimeError(
+                "Valgcellen på den forventede sag er ikke entydig."
+            )
+        await valg_celle.click(
+            timeout=min(ACTION_TIMEOUT_MS, timeout)
+        )
+
+    elapsed_ms = 0
+    while elapsed_ms < timeout:
+        if (
+            _normaliser_tekst(await field.input_value()).casefold()
+            == "1 sag valgt"
+        ):
+            break
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+    else:
+        raise PlaywrightTimeoutError(
+            "Sagsvælgeren viste ikke '1 sag valgt'."
+        )
+
+    # "Gå videre" er ikke det samme som "Godkend".
+    videre = page.get_by_role(
+        "button",
+        name="Gå videre",
+        exact=True,
+    )
+    if await videre.count() != 1 or not await videre.is_enabled():
+        raise RuntimeError(
+            "Gå videre-knappen er ikke entydig eller aktiv."
+        )
+    await videre.click(
+        timeout=min(ACTION_TIMEOUT_MS, timeout)
+    )
+
+    await _vent_paa_opgaveloader(page=page, timeout=timeout)
+    await formular.first.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
+# SLUT: _aabn_opfoelgningsformular()
 
 
 async def _vent_paa_formular(page: Page, timeout: int) -> None:

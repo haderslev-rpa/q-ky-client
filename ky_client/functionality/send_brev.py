@@ -67,6 +67,7 @@ async def send_brev(
     passive: bool = True,
     test: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
+    forventet_vedroerer: str | None = None,
 ) -> SendBrevResultat:
     """Overtag og udfyld Send brev-opgaven fra opstart_opgave.
 
@@ -78,6 +79,7 @@ async def send_brev(
     valgt_sag = await vaelg_sag_til_brev(
         page=page,
         soegevaerdi=sag,
+        forventet_vedroerer=forventet_vedroerer,
         aktive=aktive,
         passive=passive,
         timeout=timeout,
@@ -136,61 +138,157 @@ async def vaelg_sag_til_brev(
     aktive: bool = True,
     passive: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
+    forventet_vedroerer: str | None = None,
 ) -> ValgtSagInfo:
-    """Søg efter eksakt SagsID og vælg rækken med fysisk dobbeltklik."""
-
+    """Kontrollér SagsID og Vedrører før valg i brevets sagsdropdown."""
     await _bekraeft_send_brev_opgave(page, timeout)
-    sags_id_input = _normaliser(soegevaerdi)
-    if not sags_id_input:
+    if not aktive and not passive:
+        raise ValueError("Mindst én sagsstatus skal vælges.")
+    sagsnummer = _normaliser(soegevaerdi)
+    forventet_navn = _normaliser(forventet_vedroerer or "").casefold()
+    if not sagsnummer:
         raise ValueError("soegevaerdi/SagsID må ikke være tomt.")
+    if not forventet_navn:
+        raise ValueError("forventet_vedroerer skal angives før sagsvalg.")
 
-    root = page.locator(f"{KYSelectors.Borgere.SEND_BREV_SAGSVAELGER}:visible").first
-    await root.wait_for(state="visible", timeout=timeout)
-
-    toggle = root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_TOGGLE).first
-    await toggle.click(timeout=ACTION_TIMEOUT_MS)
-
-    menu = root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_MENU).first
+    root = page.locator("#brev_instans_0 div.sagsvaelger.dropdown:visible")
+    if await root.count() != 1:
+        raise RuntimeError("Forventede præcis én synlig sagsdropdown for brevet.")
+    menu = root.locator("div.sagsvaelger-list.dropdown-menu").first
+    # Genbrug en allerede åben dropdown; åbn den kun om nødvendigt.
+    if not await menu.is_visible():
+        await root.locator("div.dropdown-toggle[data-toggle='dropdown']").first.click(
+            timeout=min(ACTION_TIMEOUT_MS, timeout)
+        )
     await menu.wait_for(state="visible", timeout=timeout)
-
     await _set_checkbox(
-        root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_AKTIVE).first,
+        root.locator("input[type='checkbox'][data-tilstand='aktiv']").first,
         aktive,
     )
     await _set_checkbox(
-        root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_PASSIVE).first,
+        root.locator("input[type='checkbox'][data-tilstand='passiv']").first,
         passive,
     )
 
-    search = root.locator(KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_SOEG).first
-    await search.wait_for(state="visible", timeout=timeout)
-    await search.fill(sags_id_input)
-    await search.dispatch_event("input")
-    await search.dispatch_event("keyup")
+    table = menu.locator("table#brevSagsvaelgerTable0:visible")
+    await table.wait_for(state="visible", timeout=timeout)
+    header_cells = table.locator("thead th")
+    headers = [
+        _normaliser(await header_cells.nth(i).inner_text()).casefold()
+        for i in range(await header_cells.count())
+    ]
 
-    await root.locator(
-        KYSelectors.Borgere.SEND_BREV_SAGSVAELGER_RESULTS
-    ).first.wait_for(state="visible", timeout=timeout)
+    def kolonne(navn: str) -> int:
+        matches = [i for i, header in enumerate(headers) if header == navn.casefold()]
+        if len(matches) != 1:
+            raise RuntimeError(f"Sagstabellen mangler entydig kolonne {navn!r}.")
+        return matches[0]
 
-    row = await _find_sag_med_eksakt_sagsid(
-        root=root,
-        sags_id=sags_id_input,
-        timeout=timeout,
+    sagsnummer_kolonne = kolonne("SagsID")
+    vedroerer_kolonne = kolonne("Vedrører")
+    # Match den viste SagsID-kolonne, ikke KY's tekniske data-id.
+    rows = table.locator("tbody > tr.table-row:visible")
+    valgt_row: Locator | None = None
+    elapsed_ms = 0
+    while elapsed_ms < timeout:
+        matches: list[Locator] = []
+        for index in range(await rows.count()):
+            row = rows.nth(index)
+            cells = row.locator("td")
+            if await cells.count() != len(headers):
+                raise RuntimeError("Sagsrækkens celler matcher ikke tabeloverskrifterne.")
+            faktisk_sagsnummer = _normaliser(
+                await cells.nth(sagsnummer_kolonne).inner_text()
+            )
+            if faktisk_sagsnummer.casefold() == sagsnummer.casefold():
+                matches.append(row)
+        if len(matches) > 1:
+            raise RuntimeError(f"Flere synlige rækker matcher SagsID {sagsnummer!r}.")
+        if matches:
+            valgt_row = matches[0]
+            break
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+    if valgt_row is None:
+        raise PlaywrightTimeoutError(
+            f"Ingen synlig række matcher SagsID {sagsnummer!r}."
+        )
+
+    status = _normaliser(await valgt_row.get_attribute("data-tilstand") or "").casefold()
+    if status not in {"aktiv", "passiv"}:
+        raise RuntimeError("Sagen har ukendt status. Ingen sag vælges.")
+    if (status == "aktiv" and not aktive) or (status == "passiv" and not passive):
+        raise RuntimeError("Sagen har fravalgt status. Ingen sag vælges.")
+    faktisk_navn = _normaliser(
+        await valgt_row.locator("td").nth(vedroerer_kolonne).inner_text()
+    ).casefold()
+    if faktisk_navn != forventet_navn:
+        raise RuntimeError(
+            "SagsID blev fundet, men Vedrører matcher ikke. Ingen sag vælges."
+        )
+    dynamisk_sag_id = (await valgt_row.get_attribute("data-id") or "").strip()
+    if not dynamisk_sag_id:
+        raise RuntimeError(f"Sagsrækken {sagsnummer!r} mangler data-id.")
+    sagstekst = _normaliser(await valgt_row.inner_text())
+    display = root.locator("input.sagsvaelger-input[readonly]").first
+
+    async def sag_er_valgt() -> bool:
+        return _normaliser(await display.input_value()).casefold() == "1 sag valgt"
+
+    if not await sag_er_valgt():
+        print(f"Klikker valgcellen for {sagsnummer}", flush=True)
+        await valgt_row.locator("td.select-row").click(
+            timeout=min(ACTION_TIMEOUT_MS, timeout)
+        )
+        for _ in range(10):
+            if await sag_er_valgt():
+                break
+            await page.wait_for_timeout(POLL_INTERVAL_MS)
+
+    if not await sag_er_valgt():
+        print("Valgcellen registrerede ikke valget; forsøger dobbeltklik.", flush=True)
+        rækker_igen = table.locator(
+            "tbody > tr.table-row:visible"
+        )
+        matchende = []
+        for index in range(await rækker_igen.count()):
+            kandidat = rækker_igen.nth(index)
+            if (await kandidat.get_attribute("data-id") == dynamisk_sag_id
+                    and _normaliser(await kandidat.get_attribute("data-tilstand") or "").casefold() == status):
+                matchende.append(kandidat)
+        if len(matchende) != 1:
+            raise RuntimeError("Sagsrækken kunne ikke genfindes entydigt.")
+        nye_celler = matchende[0].locator("td")
+        nyt_sagsnummer = _normaliser(
+            await nye_celler.nth(sagsnummer_kolonne).inner_text()
+        )
+        nyt_navn = _normaliser(
+            await nye_celler.nth(vedroerer_kolonne).inner_text()
+        ).casefold()
+        if (nyt_sagsnummer.casefold() != sagsnummer.casefold()
+                or nyt_navn != forventet_navn):
+            raise RuntimeError("Sagsrækken ændrede SagsID eller Vedrører.")
+        await nye_celler.nth(sagsnummer_kolonne).dblclick(
+            timeout=min(ACTION_TIMEOUT_MS, timeout)
+        )
+
+    elapsed_ms = 0
+    while elapsed_ms < timeout:
+        if await sag_er_valgt():
+            print(f"KY viser '1 sag valgt': {sagsnummer}", flush=True)
+            return {
+                "sag_id": dynamisk_sag_id,
+                "sagstekst": sagstekst,
+                "aktive": aktive,
+                "passive": passive,
+            }
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+    raise PlaywrightTimeoutError(
+        f"KY registrerede ikke valget af {sagsnummer!r}. "
+        f"Hovedfeltets værdi: {await display.input_value()!r}. "
+        f"Dropdown synlig: {await menu.is_visible()}."
     )
-    dynamic_sag_id = (await row.get_attribute("data-id") or "").strip()
-    sagstekst = _normaliser(await row.inner_text())
-    if not dynamic_sag_id:
-        raise RuntimeError("Den fundne sagsrække mangler data-id.")
-
-    await _dobbeltklik_paa_sagsraekke(page, row, timeout)
-    await _vent_paa_sagsvalg_registreret(root, dynamic_sag_id, timeout)
-
-    return {
-        "sag_id": dynamic_sag_id,
-        "sagstekst": sagstekst,
-        "aktive": aktive,
-        "passive": passive,
-    }
 
 
 async def vaelg_brevskabelon(
@@ -1003,4 +1101,3 @@ async def _set_checkbox(locator: Locator, checked: bool) -> None:
 
 def _normaliser(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
-

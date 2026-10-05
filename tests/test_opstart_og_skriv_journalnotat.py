@@ -1,30 +1,21 @@
-"""Integrationstest af ``opstart_opgave`` og ``skriv_journalnotat`` i KY.
+"""Integrationstest af opstart_opgave og skriv_journalnotat i KY.
 
-Testen følger den fælles opgavestruktur:
-
-1. Launcher KY.
-2. Fremsøger og validerer TEST_CPR_1 fra projektets .env.
-3. Kalder ``opstart_opgave`` først.
-4. ``opstart_opgave`` genoptager en eksisterende opgave, hvis der findes et
-   opgave-id, ellers oprettes en ny Skriv journalnotat-opgave.
-5. Sender checkpointet til ``skriv_journalnotat``.
-6. Journalnotatformularen udfyldes igen, uanset om opgaven er ny eller
-   genoptaget.
-7. Både Aktive sager og Passive sager sættes til True.
-8. Kører med test=True, så der ikke klikkes på Gem eller Godkend.
-9. Venter 10 sekunder med den udfyldte formular før browseren lukkes.
+Forløb:
+1. Åbn KY, og fremsøg testborgeren.
+2. Genoptag en angivet journalnotatopgave, eller opret en ny.
+3. Kontrollér checkpointet og de journalnotatspecifikke box-felter.
+4. Udfyld journalnotatet med test=True, uden Gem eller Godkend.
+5. Vis den udfyldte formular kortvarigt, og luk browsersessionen.
 
 Påkrævede værdier i projektets .env:
-    TEST_CPR_1=DDMMYYXXXX
-    JOURNALNOTAT_SAG=RESJR-IIKVOV
+    TEST_CPR=<testborgerens CPR>
+    JOURNALNOTAT_SAG=<eksisterende SagsID for testborgeren>
     JOURNALNOTAT_SKABELON=Kontrol af bil
 
 Valgfrit:
-    JOURNALNOTAT_OPGAVE_ID=6517c6e4-bb8a-4af0-bc28-587a95d5a117
+    JOURNALNOTAT_OPGAVE_ID=<id på en eksisterende opgave>
 
-Hvis JOURNALNOTAT_OPGAVE_ID er et gyldigt UUID, forsøger opstart_opgave at
-finde og genoptage opgaven fra Ubehandlede opgaver. Hvis variablen er tom,
-opretter opstart_opgave en ny opgave via Handlinger-menuen.
+Et tomt JOURNALNOTAT_OPGAVE_ID betyder, at der oprettes en ny opgave.
 
 Kør:
     uv run pytest tests/test_opstart_og_skriv_journalnotat.py -s -vv
@@ -75,18 +66,22 @@ MENU_STI = (
     "Administration",
     OPGAVENAVN,
 )
+CHECKPOINT_TYPE = "journalnotat"
 
-ENV_CPR = "TEST_CPR_1"
+ENV_CPR = "TEST_CPR"
 ENV_OPGAVE_ID = "JOURNALNOTAT_OPGAVE_ID"
 ENV_SAG = "JOURNALNOTAT_SAG"
 ENV_SKABELON = "JOURNALNOTAT_SKABELON"
+
+BOX_OPGAVE_ID = "Journalnotat Opgave-Id"
+BOX_OPGAVE_URL = "Journalnotat Opgave URL"
+BOX_OPGAVENAVN = "Journalnotat Opgavenavn"
 
 
 async def test_opstart_og_skriv_journalnotat(
     ky_credential_name: str,
 ) -> None:
-    """Start/genoptag opgaven og udfyld journalnotatet uden afslutning."""
-
+    """Start eller genoptag opgaven, og udfyld uden at afslutte den."""
     cpr = _hent_test_cpr(ENV_CPR)
     opgave_id = _optional_uuid_env(ENV_OPGAVE_ID)
     journalnotat_sag = _hent_paakraevet_env(ENV_SAG)
@@ -101,8 +96,7 @@ async def test_opstart_og_skriv_journalnotat(
     borgere: BorgereClient | None = None
     faner_foer_test: set[str] = set()
 
-    # opstart_opgave gemmer det aktive checkpoint her. Robotten kan gemme
-    # box-data efter et crash og sende data ind igen ved næste kørsel.
+    # Checkpointet ligger kun i denne tests item_data.
     item_data: dict[str, Any] = {
         "box": {},
     }
@@ -123,7 +117,9 @@ async def test_opstart_og_skriv_journalnotat(
         )
 
         assert not page.is_closed(), "KY-siden blev lukket under launch."
-        assert not is_ky_error_url(page), f"KY viste fejlsiden: {page.url}"
+        assert not is_ky_error_url(page), (
+            f"KY viste fejlsiden: {page.url}"
+        )
         assert is_ky_url(page), (
             f"Siden er ikke en gyldig KY-side: {page.url}"
         )
@@ -131,7 +127,7 @@ async def test_opstart_og_skriv_journalnotat(
             "KY-sessionen mangler JSESSIONID."
         )
 
-        _print_step("FREMSØGER BORGER FRA TEST_CPR_1")
+        _print_step(f"FREMSØGER BORGER FRA {ENV_CPR}")
         borgere = BorgereClient(page)
         faner_foer_test = await borgere.hent_aabne_borger_ids()
 
@@ -162,6 +158,7 @@ async def test_opstart_og_skriv_journalnotat(
             menu_sti=MENU_STI,
             item_data=item_data,
             opgave_id=opgave_id,
+            checkpoint_type=CHECKPOINT_TYPE,
             timeout=PAGE_TIMEOUT_MS,
         )
 
@@ -253,8 +250,7 @@ def _kontroller_checkpoint(
     forventet_person_id: str,
     forventet_opgave_id: str | None,
 ) -> None:
-    """Kontrollér resultatet fra den fælles opstart_opgave."""
-
+    """Kontrollér opgaven og journalnotatets box-felter."""
     required = {
         "opgave_id",
         "opgave_navn",
@@ -265,7 +261,9 @@ def _kontroller_checkpoint(
         "kilde",
     }
     missing = required - set(checkpoint)
-    assert not missing, f"Checkpointet mangler felter: {sorted(missing)}"
+    assert not missing, (
+        f"Checkpointet mangler felter: {sorted(missing)}"
+    )
 
     faktisk_id = str(checkpoint["opgave_id"] or "").strip()
     faktisk_navn = str(checkpoint["opgave_navn"] or "").strip()
@@ -284,20 +282,21 @@ def _kontroller_checkpoint(
         assert checkpoint["genoptaget"] is True
         assert checkpoint["kilde"] == "ubehandlede_opgaver"
         assert faktisk_id.casefold() == forventet_opgave_id.casefold()
-        assert _er_rigtig_opgave_url(
-            url=faktisk_url,
-            forventet_person_id=forventet_person_id,
-            forventet_opgave_id=forventet_opgave_id,
-        ), f"Forkert URL for genoptaget opgave: {faktisk_url!r}."
     else:
         assert checkpoint["genoptaget"] is False
         assert checkpoint["kilde"] == "ny_opgave"
 
+    assert _er_rigtig_opgave_url(
+        url=faktisk_url,
+        forventet_person_id=forventet_person_id,
+        forventet_opgave_id=faktisk_id,
+    ), f"Uventet opgave-URL: {faktisk_url!r}."
+
     box = item_data.get("box")
     assert isinstance(box, dict), "item_data['box'] mangler."
-    assert box.get("Aktiv Opgave-Id") == faktisk_id
-    assert box.get("Aktiv Opgave URL") == faktisk_url
-    assert box.get("Aktiv Opgavenavn") == faktisk_navn
+    assert box.get(BOX_OPGAVE_ID) == faktisk_id
+    assert box.get(BOX_OPGAVE_URL) == faktisk_url
+    assert box.get(BOX_OPGAVENAVN) == faktisk_navn
 
 
 def _kontroller_resultat(
@@ -306,8 +305,7 @@ def _kontroller_resultat(
     journalnotat_sag: str,
     journalnotat_skabelon: str,
 ) -> None:
-    """Kontrollér checkpoint, formularvalg og sikker testtilstand."""
-
+    """Kontrollér formularvalg og at opgaven ikke er afsluttet."""
     required = {
         "opgave_id",
         "opgave_navn",
@@ -324,7 +322,9 @@ def _kontroller_resultat(
         "afsluttet",
     }
     missing = required - set(resultat)
-    assert not missing, f"Resultatet mangler felter: {sorted(missing)}"
+    assert not missing, (
+        f"Resultatet mangler felter: {sorted(missing)}"
+    )
 
     assert resultat["opgave_id"] == checkpoint["opgave_id"]
     assert resultat["opgave_navn"] == checkpoint["opgave_navn"]
@@ -369,23 +369,29 @@ def _er_rigtig_opgave_url(
     forventet_person_id: str,
     forventet_opgave_id: str,
 ) -> bool:
-    """Kontrollér overblik-URL med pId og opgaveId."""
-
+    """Acceptér de to observerede URL-former, og kontrollér opgave-id."""
     parsed = urlparse(str(url or "").strip())
-    return (
-        parsed.path.casefold().endswith(
-            "/ky-fagsystem/entitet/overblik"
+    path = parsed.path.rstrip("/").casefold()
+    opgave_id = forventet_opgave_id.casefold()
+
+    # Den oprettede opgave blev vist som /opgave/undock/<opgave-id>.
+    if path.endswith(f"/ky-fagsystem/opgave/undock/{opgave_id}"):
+        return True
+
+    # Ved overblik-URL kontrolleres både person-id og opgave-id.
+    if path.endswith("/ky-fagsystem/entitet/overblik"):
+        return (
+            _hent_query_parameter(url, "pId").casefold()
+            == forventet_person_id.casefold()
+            and _hent_query_parameter(url, "opgaveId").casefold()
+            == opgave_id
         )
-        and _hent_query_parameter(url, "pId").casefold()
-        == forventet_person_id.casefold()
-        and _hent_query_parameter(url, "opgaveId").casefold()
-        == forventet_opgave_id.casefold()
-    )
+
+    return False
 
 
 def _hent_query_parameter(url: str, name: str) -> str:
     """Returnér første værdi for en queryparameter."""
-
     values = parse_qs(
         urlparse(str(url or "").strip()).query
     ).get(name, [])
@@ -393,8 +399,7 @@ def _hent_query_parameter(url: str, name: str) -> str:
 
 
 def _optional_uuid_env(name: str) -> str | None:
-    """Hent et valgfrit opgave-id og kræv et gyldigt UUID."""
-
+    """Hent et valgfrit opgave-id, og kræv et gyldigt UUID."""
     value = os.getenv(name, "").strip()
     if value.casefold() in {"", "null", "none", "nul"}:
         return None
@@ -415,7 +420,6 @@ def _optional_uuid_env(name: str) -> str | None:
 
 def _hent_test_cpr(variable_name: str) -> str:
     """Hent og validér CPR fra projektets .env-fil."""
-
     raw_value = os.getenv(variable_name, "").strip()
     match = re.fullmatch(
         r"\s*(\d{6})[\s-]?(\d{4})\s*",
@@ -434,7 +438,6 @@ def _hent_test_cpr(variable_name: str) -> str:
 
 def _hent_paakraevet_env(variable_name: str) -> str:
     """Hent en obligatorisk tekstværdi fra projektets .env-fil."""
-
     value = os.getenv(variable_name, "").strip()
     if not value:
         pytest.fail(
@@ -445,20 +448,20 @@ def _hent_paakraevet_env(variable_name: str) -> str:
 
 
 def _samme_tekst(actual: object, expected: object) -> bool:
-    """Sammenlign normaliseret tekst uden forskel på store/små bogstaver."""
-
-    return _normaliser(actual).casefold() == _normaliser(expected).casefold()
+    """Sammenlign tekst uden forskel på store og små bogstaver."""
+    return (
+        _normaliser(actual).casefold()
+        == _normaliser(expected).casefold()
+    )
 
 
 def _normaliser(value: object) -> str:
-    """Saml whitespace og trim tekst."""
-
+    """Saml whitespace, og trim tekst."""
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def _masker_cpr(cpr: str) -> str:
     """Maskér CPR i testens output."""
-
     digits = re.sub(r"\D", "", cpr)
     return (
         f"******{digits[-4:]}"
@@ -472,7 +475,6 @@ def _set_recorder_page(
     page: Page,
 ) -> None:
     """Knyt BrowserSessions recorder til den aktive side."""
-
     recorder = getattr(session, "recorder", None)
     set_page = getattr(recorder, "set_page", None)
     if callable(set_page):
@@ -481,7 +483,6 @@ def _set_recorder_page(
 
 def _print_step(title: str) -> None:
     """Print en tydelig sektionsoverskrift."""
-
     print(flush=True)
     print("=" * 70, flush=True)
     print(title, flush=True)
