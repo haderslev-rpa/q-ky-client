@@ -652,17 +652,16 @@ def _journalnotat_normaliser_overskrift(
     )
 
 
-def _journalnotat_normaliser_navn(
-    value: object,
-) -> str:
-    """Normalisér navn til en sikker sammenligning."""
+def _journalnotat_normaliser_navn(value: object) -> str:
+    """Normaliser navn og fjern et afsluttende parentes-suffiks."""
     resultat = _journalnotat_normaliser_tekst(value)
-    resultat = re.sub(
-        r"\s*-\s*$",
-        "",
-        resultat,
-    ).strip()
+
+    # Personoplysninger kan have et suffiks, som sagstabellen ikke viser.
+    resultat = re.sub(r"\s+\([^()]*\)\s*$", "", resultat).strip()
+    resultat = re.sub(r"\s*-\s*$", "", resultat).strip()
+
     return resultat.casefold()
+
 
 
 async def _journalnotat_vent_paa_en_sag_valgt(
