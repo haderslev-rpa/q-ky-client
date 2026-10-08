@@ -3252,8 +3252,39 @@ async def _modtag_post_vaelg_sag(
     nuvaerende_vaerdi = _modtag_post_normaliser_tekst(
         await hovedfelt.input_value()
     )
+    # Aabn dropdownen foer synlige markerede raekker aflaeses.
+    soegefelter = page.locator(
+        KYSelectors.Borgere.MODTAG_POST_SAGSVAELGER_SOEG
+    )
+    menu_aaben = False
+    for index in range(await soegefelter.count()):
+        if await soegefelter.nth(index).is_visible():
+            menu_aaben = True
+            break
+    if not menu_aaben:
+        await hovedfelt.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
+    soegefelt = await _modtag_post_find_eneste_synlige(
+        page=page,
+        selector=KYSelectors.Borgere.MODTAG_POST_SAGSVAELGER_SOEG,
+        feltnavn="sagsvaelgerens soegefelt",
+        timeout=timeout,
+    )
     if nuvaerende_vaerdi.casefold() == "1 sag valgt":
-        valgt = await _modtag_post_hent_valgt_sag(page)
+        # Et gammelt soegefilter maa ikke skjule den allerede valgte sag.
+        await soegefelt.fill("")
+        await soegefelt.dispatch_event("input")
+        await soegefelt.dispatch_event("change")
+        await soegefelt.dispatch_event("keyup")
+        valgt = None
+        elapsed_ms = 0
+        while elapsed_ms < timeout:
+            if page.is_closed():
+                raise RuntimeError("KY-siden blev lukket under sagskontrollen.")
+            valgt = await _modtag_post_hent_valgt_sag(page)
+            if valgt is not None:
+                break
+            await page.wait_for_timeout(POLL_INTERVAL_MS)
+            elapsed_ms += POLL_INTERVAL_MS
         if valgt is None:
             raise RuntimeError(
                 "Sagsvælgeren viser '1 sag valgt', men den valgte sag "
@@ -3268,9 +3299,33 @@ async def _modtag_post_vaelg_sag(
                 "Modtag post har allerede én valgt sag, men sagen matcher "
                 f"ikke søgekriteriet {sag!r}. Valgt sag={valgt!r}."
             )
+        # Kontrollér ogsaa den allerede valgte sags status.
+        markerede = page.locator(
+            KYSelectors.Borgere.MODTAG_POST_SAGSVAELGER_VALGTE_RAEKKER
+        )
+        tilstande = []
+        for index in range(await markerede.count()):
+            row = markerede.nth(index)
+            if (await row.is_visible()
+                    and (await row.get_attribute("data-id") or "").strip()
+                    == valgt["sag_id"]):
+                tilstande.append(_modtag_post_normaliser_tekst(
+                    await row.get_attribute("data-tilstand") or ""
+                ).casefold())
+        if len(tilstande) != 1 or not (
+            (tilstande[0] == "aktiv" and aktive_sager)
+            or (tilstande[0] == "passiv" and passive_sager)
+        ):
+            raise RuntimeError(
+                "Den allerede valgte sag har ukendt eller fravalgt status. "
+                "Opgaven godkendes ikke."
+            )
+        await _modtag_post_vent_paa_en_sag_valgt(
+            hovedfelt=hovedfelt, timeout=timeout,
+        )
+        await _modtag_post_luk_sagsvaelger(page=page, timeout=timeout)
+        logger.info("Modtag post: eksisterende sagsvalg verificeret.")
         return valgt
-
-    await hovedfelt.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
     await _modtag_post_saet_checkbox(
         page=page,
         selector=KYSelectors.Borgere.MODTAG_POST_SAGSVAELGER_AKTIVE,
@@ -3341,6 +3396,7 @@ async def _modtag_post_vaelg_sag(
         "sag_id": sag_id,
         "sagstekst": sagstekst,
     }
+
 
 
 async def _modtag_post_hent_valgt_sag(
