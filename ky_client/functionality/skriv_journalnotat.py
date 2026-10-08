@@ -1,3 +1,5 @@
+"""Udfyld og afslut en allerede åbnet Skriv journalnotat-opgave i KY."""
+
 from __future__ import annotations
 
 import os
@@ -14,6 +16,7 @@ from ky_client.functionality.borgere import (
     OpstartOpgaveCheckpoint,
 )
 from ky_client.selectors import KYSelectors
+
 
 ACTION_TIMEOUT_MS = 30_000
 POLL_INTERVAL_MS = 250
@@ -57,6 +60,7 @@ async def opret_journalnotat(
     page: Page,
     checkpoint: OpstartOpgaveCheckpoint,
     sag: str | None = None,
+    primaerpart_navn: str | None = None,
     journalnotatskabelon: str | None = None,
     aktive: bool = True,
     passive: bool = True,
@@ -67,25 +71,39 @@ async def opret_journalnotat(
 
     Funktionen åbner, genoptager eller opretter aldrig selv en opgave.
     ``checkpoint`` skal være resultatet fra den fælles ``opstart_opgave``.
-    Ved ``test=True`` klikkes der ikke på Gem eller Godkend.
+    ``primaerpart_navn`` bruges til at vælge den entydige sagsrække.
+    Ved ``test=True`` klikkes der ikke på Godkend.
     """
     if page.is_closed():
-        raise RuntimeError("KY-siden er lukket før journalnotatet udfyldes.")
+        raise RuntimeError(
+            "KY-siden er lukket før journalnotatet udfyldes."
+        )
+
     _journalnotat_valider_checkpoint(checkpoint)
+
     udfyldt = await udfyld_aabnet_journalnotat(
         page=page,
         sag=sag,
+        primaerpart_navn=primaerpart_navn,
         journalnotatskabelon=journalnotatskabelon,
         aktive=aktive,
         passive=passive,
         timeout=timeout,
     )
+
     afsluttet = False
     if test:
-        print("TESTTILSTAND: Journalnotatet afsluttes ikke.", flush=True)
+        print(
+            "TESTTILSTAND: Journalnotatet afsluttes ikke.",
+            flush=True,
+        )
     else:
-        await _journalnotat_afslut_opgave(page=page, timeout=timeout)
+        await _journalnotat_afslut_opgave(
+            page=page,
+            timeout=timeout,
+        )
         afsluttet = True
+
     return {
         "opgave_id": checkpoint["opgave_id"],
         "opgave_navn": checkpoint["opgave_navn"],
@@ -108,11 +126,26 @@ def _journalnotat_valider_checkpoint(
 ) -> None:
     """Kræv checkpoint fra opstart_opgave til Skriv journalnotat."""
     if not isinstance(checkpoint, dict):
-        raise TypeError("checkpoint skal komme fra opstart_opgave().")
-    for key in ("opgave_id", "opgave_navn", "opgave_url", "borger_url", "menu_sti"):
+        raise TypeError(
+            "checkpoint skal komme fra opstart_opgave()."
+        )
+
+    for key in (
+        "opgave_id",
+        "opgave_navn",
+        "opgave_url",
+        "borger_url",
+        "menu_sti",
+    ):
         if not checkpoint.get(key):
-            raise RuntimeError(f"Checkpointet mangler {key}.")
-    if str(checkpoint["opgave_navn"]).casefold() != "Skriv journalnotat".casefold():
+            raise RuntimeError(
+                f"Checkpointet mangler {key}."
+            )
+
+    if (
+        str(checkpoint["opgave_navn"]).casefold()
+        != "Skriv journalnotat".casefold()
+    ):
         raise RuntimeError(
             "Checkpointet tilhører ikke Skriv journalnotat. "
             f"Faktisk opgavenavn={checkpoint['opgave_navn']!r}."
@@ -122,20 +155,17 @@ def _journalnotat_valider_checkpoint(
 async def udfyld_aabnet_journalnotat(
     page: Page,
     sag: str | None = None,
+    primaerpart_navn: str | None = None,
     journalnotatskabelon: str | None = None,
     aktive: bool = True,
     passive: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
 ) -> UdfyldtJournalnotat:
-    """Udfyld en journalnotatopgave, som allerede er åbnet eller genoptaget.
-
-    Funktionen åbner ikke en ny opgave. Den er derfor den korrekte indgang
-    efter ``opstart_opgave``. Eventuelle tidligere valgte sager og en tidligere
-    skabelon nulstilles, før de nye værdier vælges.
-    """
-
+    """Udfyld en journalnotatopgave, som allerede er åbnet."""
     if page.is_closed():
-        raise RuntimeError("KY-siden er lukket før journalnotatet udfyldes.")
+        raise RuntimeError(
+            "KY-siden er lukket før journalnotatet udfyldes."
+        )
 
     sag = _journalnotat_input_eller_env(
         value=sag,
@@ -147,13 +177,21 @@ async def udfyld_aabnet_journalnotat(
         env_name=ENV_JOURNALNOTAT_SKABELON,
         feltnavn="journalnotatskabelon",
     )
+    primaerpart_navn = _journalnotat_paakraevet_tekst(
+        str(primaerpart_navn or ""),
+        "primaerpart_navn",
+    )
 
-    await _journalnotat_vent_paa_formular(page=page, timeout=timeout)
+    await _journalnotat_vent_paa_formular(
+        page=page,
+        timeout=timeout,
+    )
     await _journalnotat_nulstil_skabelon(page=page)
 
     valgt_sag = await _journalnotat_vaelg_sag(
         page=page,
         sag=sag,
+        primaerpart_navn=primaerpart_navn,
         aktive=aktive,
         passive=passive,
         timeout=timeout,
@@ -177,29 +215,40 @@ async def _journalnotat_vent_paa_formular(
     timeout: int,
 ) -> None:
     """Vent på journalnotatets præcise sagsdropdown."""
-
-    selector = KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_DROPDOWN
+    selector = (
+        KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_DROPDOWN
+    )
     dropdown = page.locator(selector).first
-    await dropdown.wait_for(state="visible", timeout=timeout)
+    await dropdown.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
 
 
 async def _journalnotat_vaelg_sag(
     page: Page,
     sag: str,
+    primaerpart_navn: str,
     aktive: bool,
     passive: bool,
     timeout: int,
 ) -> dict[str, str]:
-    """Vælg sag med ét klik, vent på '1 sag valgt', og tryk Escape."""
-
-    dropdown_selector = KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_DROPDOWN
+    """Vælg én sag, hvor søgetekst og primærpart matcher."""
+    dropdown_selector = (
+        KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_DROPDOWN
+    )
     dropdown = page.locator(dropdown_selector).first
 
-    await dropdown.wait_for(state="visible", timeout=timeout)
+    await dropdown.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
     await dropdown.scroll_into_view_if_needed()
 
     if not await dropdown.is_enabled():
-        raise RuntimeError("Journalnotatets sagsdropdown er synlig, men ikke aktiv.")
+        raise RuntimeError(
+            "Journalnotatets sagsdropdown er synlig, men ikke aktiv."
+        )
 
     await _journalnotat_aabn_sagsvaelger(
         page=page,
@@ -210,17 +259,20 @@ async def _journalnotat_vaelg_sag(
         page=page,
         timeout=timeout,
     )
-
     await _journalnotat_saet_checkbox(
         page=page,
-        selector=KYSelectors.Borgere.JOURNALNOTAT_AKTIV_CHECKBOX,
+        selector=(
+            KYSelectors.Borgere.JOURNALNOTAT_AKTIV_CHECKBOX
+        ),
         checked=aktive,
         feltnavn="Aktive sager",
         timeout=timeout,
     )
     await _journalnotat_saet_checkbox(
         page=page,
-        selector=KYSelectors.Borgere.JOURNALNOTAT_PASSIV_CHECKBOX,
+        selector=(
+            KYSelectors.Borgere.JOURNALNOTAT_PASSIV_CHECKBOX
+        ),
         checked=passive,
         feltnavn="Passive sager",
         timeout=timeout,
@@ -229,7 +281,10 @@ async def _journalnotat_vaelg_sag(
     search = page.locator(
         f"{KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_SOEG}:visible"
     ).last
-    await search.wait_for(state="visible", timeout=timeout)
+    await search.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
     await search.fill(sag)
     await search.dispatch_event("input")
     await search.dispatch_event("keyup")
@@ -237,6 +292,7 @@ async def _journalnotat_vaelg_sag(
     row = await _journalnotat_find_entydig_sag(
         page=page,
         sag=sag,
+        primaerpart_navn=primaerpart_navn,
         timeout=timeout,
     )
 
@@ -246,27 +302,35 @@ async def _journalnotat_vaelg_sag(
         or await row.get_attribute("data-sagsid")
         or ""
     ).strip()
-    sagstekst = _journalnotat_normaliser_tekst(await row.inner_text())
+    if not sag_id:
+        raise RuntimeError(
+            "Den valgte sagsrække mangler et teknisk sag-id."
+        )
+
+    sagstekst = _journalnotat_normaliser_tekst(
+        await row.inner_text()
+    )
 
     await row.scroll_into_view_if_needed()
-    await row.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
+    await row.click(
+        timeout=min(ACTION_TIMEOUT_MS, timeout)
+    )
 
     await _journalnotat_vent_paa_en_sag_valgt(
         page=page,
         dropdown_selector=dropdown_selector,
         timeout=timeout,
     )
-
-    # Minimer sagsvælgeren robust. Escape forsøges først. Hvis KY ikke
-    # reagerer, klikkes det synlige X. Til sidst bruges dropdownknappen som
-    # fallback. Hvert forsøg verificeres, før næste metode bruges.
     await _journalnotat_minimer_sagsvaelger(
         page=page,
         dropdown_selector=dropdown_selector,
         timeout=timeout,
     )
 
-    return {"sag_id": sag_id, "sagstekst": sagstekst}
+    return {
+        "sag_id": sag_id,
+        "sagstekst": sagstekst,
+    }
 
 
 async def _journalnotat_aabn_sagsvaelger(
@@ -275,7 +339,6 @@ async def _journalnotat_aabn_sagsvaelger(
     timeout: int,
 ) -> None:
     """Åbn sagsvælgeren og vent på det interne søgefelt."""
-
     elapsed_ms = 0
     while elapsed_ms < timeout:
         searches = page.locator(
@@ -283,14 +346,20 @@ async def _journalnotat_aabn_sagsvaelger(
         )
         if await searches.count() > 0:
             return
+
         try:
-            await dropdown.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
+            await dropdown.click(
+                timeout=min(ACTION_TIMEOUT_MS, timeout)
+            )
         except Exception:
             pass
+
         await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
 
-    raise PlaywrightTimeoutError("Sagsvælgerens søgefelt blev ikke synligt.")
+    raise PlaywrightTimeoutError(
+        "Sagsvælgerens søgefelt blev ikke synligt."
+    )
 
 
 async def _journalnotat_nulstil_valgte_sager(
@@ -298,14 +367,17 @@ async def _journalnotat_nulstil_valgte_sager(
     timeout: int,
 ) -> None:
     """Fravælg tidligere valgte sager før det nye valg."""
-
-    selector = KYSelectors.Borgere.JOURNALNOTAT_VALGTE_SAGSRAEKKER
+    selector = (
+        KYSelectors.Borgere.JOURNALNOTAT_VALGTE_SAGSRAEKKER
+    )
     selected = page.locator(f"{selector}:visible")
 
     for index in reversed(range(await selected.count())):
         row = selected.nth(index)
         try:
-            await row.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
+            await row.click(
+                timeout=min(ACTION_TIMEOUT_MS, timeout)
+            )
         except Exception:
             continue
 
@@ -318,13 +390,17 @@ async def _journalnotat_saet_checkbox(
     timeout: int,
 ) -> None:
     """Sæt og kontrollér fluebenet for aktive eller passive sager."""
-
     checkboxes = page.locator(f"{selector}:visible")
     if await checkboxes.count() == 0:
-        raise RuntimeError(f"Checkboxen {feltnavn!r} blev ikke fundet.")
+        raise RuntimeError(
+            f"Checkboxen {feltnavn!r} blev ikke fundet."
+        )
 
     checkbox = checkboxes.last
-    await checkbox.wait_for(state="visible", timeout=timeout)
+    await checkbox.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
 
     if await checkbox.is_checked() != checked:
         await checkbox.set_checked(
@@ -343,55 +419,154 @@ async def _journalnotat_saet_checkbox(
 async def _journalnotat_find_entydig_sag(
     page: Page,
     sag: str,
+    primaerpart_navn: str,
     timeout: int,
 ) -> Locator:
-    """Find én synlig sagsrække med eksakt eller entydigt tekstmatch."""
+    """Find én sag, hvor sagstekst og primærpart matcher entydigt."""
+    wanted_sag = _journalnotat_normaliser_tekst(
+        sag
+    ).casefold()
+    wanted_name = _journalnotat_normaliser_navn(
+        primaerpart_navn
+    )
 
-    wanted = _journalnotat_normaliser_tekst(sag).casefold()
+    if not wanted_sag:
+        raise ValueError("sag må ikke være tom.")
+    if not wanted_name:
+        raise ValueError(
+            "primaerpart_navn må ikke være tomt."
+        )
+
+    table = page.locator(
+        "#sagsvaelgertable:visible"
+    ).last
+    await table.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
+
+    header_cells = table.locator("thead th")
+    headers = [
+        _journalnotat_normaliser_overskrift(
+            await header_cells.nth(index).inner_text()
+        )
+        for index in range(await header_cells.count())
+    ]
+
+    primaerpart_indexes = [
+        index
+        for index, header in enumerate(headers)
+        if (
+            "udb. modtager" in header
+            and "primaerpart" in header
+        )
+    ]
+    if len(primaerpart_indexes) != 1:
+        raise RuntimeError(
+            "Journalnotatets sagstabel mangler en entydig kolonne "
+            "'Udb. modtager / Primærpart'. "
+            f"Fundne kolonner={headers!r}."
+        )
+
+    primaerpart_index = primaerpart_indexes[0]
     elapsed_ms = 0
+    diagnostic: list[dict[str, str]] = []
 
     while elapsed_ms < timeout:
-        rows = page.locator(
-            f"{KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_FOERSTE_RESULTAT}:visible"
+        rows = table.locator(
+            "tbody tr:not([style*='display: none']):visible"
         )
-        exact: list[Locator] = []
-        contains: list[Locator] = []
+        matches: list[Locator] = []
+        diagnostic = []
 
         for index in range(await rows.count()):
             row = rows.nth(index)
             try:
                 if not await row.is_visible():
                     continue
-                row_text = _journalnotat_normaliser_tekst(await row.inner_text())
-                cells = row.locator("td:not(.handlinger)")
-                cell_values = [
-                    _journalnotat_normaliser_tekst(
-                        await cells.nth(i).inner_text()
-                    ).casefold()
-                    for i in range(await cells.count())
+
+                row_text = _journalnotat_normaliser_tekst(
+                    await row.inner_text()
+                )
+                if wanted_sag not in row_text.casefold():
+                    continue
+
+                cells = row.locator("td")
+                if await cells.count() <= primaerpart_index:
+                    raise RuntimeError(
+                        "En sagsrække mangler cellen for "
+                        "'Udb. modtager / Primærpart'."
+                    )
+
+                primaerpart_text = _journalnotat_normaliser_tekst(
+                    await cells.nth(
+                        primaerpart_index
+                    ).inner_text()
+                )
+                primaerpart_names = [
+                    _journalnotat_normaliser_navn(value)
+                    for value in primaerpart_text.split("/")
+                    if _journalnotat_normaliser_navn(value)
                 ]
-                if wanted in cell_values or row_text.casefold() == wanted:
-                    exact.append(row)
-                elif wanted in row_text.casefold():
-                    contains.append(row)
+
+                diagnostic.append(
+                    {
+                        "sag": row_text,
+                        "primaerpart": primaerpart_text,
+                    }
+                )
+
+                if wanted_name in primaerpart_names:
+                    matches.append(row)
+            except RuntimeError:
+                raise
             except Exception:
                 continue
 
-        if len(exact) == 1:
-            return exact[0]
-        if len(exact) > 1:
-            raise RuntimeError(f"Flere sager matcher eksakt {sag!r}.")
-        if len(contains) == 1:
-            return contains[0]
-        if len(contains) > 1:
+        if len(matches) == 1:
+            return matches[0]
+
+        if len(matches) > 1:
             raise RuntimeError(
-                f"Flere sager indeholder {sag!r}. Angiv et entydigt SagsID."
+                "Flere sager matcher både "
+                f"{sag!r} og navnet fra Personoplysninger. "
+                "Ingen sag vælges."
             )
 
         await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
 
-    raise PlaywrightTimeoutError(f"Sagen {sag!r} blev ikke fundet i sagsvælgeren.")
+    raise PlaywrightTimeoutError(
+        "Ingen sag matchede både "
+        f"{sag!r} og navnet fra Personoplysninger. "
+        f"Synlige kandidater={diagnostic!r}."
+    )
+
+
+def _journalnotat_normaliser_overskrift(
+    value: object,
+) -> str:
+    """Normalisér tabeloverskrift og danske specialtegn."""
+    return (
+        _journalnotat_normaliser_tekst(value)
+        .casefold()
+        .replace("æ", "ae")
+        .replace("ø", "oe")
+        .replace("å", "aa")
+    )
+
+
+def _journalnotat_normaliser_navn(
+    value: object,
+) -> str:
+    """Normalisér navn til en sikker sammenligning."""
+    resultat = _journalnotat_normaliser_tekst(value)
+    resultat = re.sub(
+        r"\s*-\s*$",
+        "",
+        resultat,
+    ).strip()
+    return resultat.casefold()
 
 
 async def _journalnotat_vent_paa_en_sag_valgt(
@@ -400,8 +575,6 @@ async def _journalnotat_vent_paa_en_sag_valgt(
     timeout: int,
 ) -> None:
     """Vent på, at readonly-inputfeltet viser '1 sag valgt'."""
-
-    # dropdown_selector beholdes i signaturen af hensyn til eksisterende kald.
     del dropdown_selector
     await _journalnotat_vent_paa_inputvaerdi(
         page=page,
@@ -414,46 +587,40 @@ async def _journalnotat_minimer_sagsvaelger(
     dropdown_selector: str,
     timeout: int,
 ) -> None:
-    """Tryk Escape direkte på sagsvælgerens readonly-input.
-
-    KY viser den valgte mængde i inputfeltet:
-
-        #command.tilfoejedeJournalnotater[0].sager
-
-    Funktionen venter først på værdien ``1 sag valgt``. Derefter fokuseres
-    det samme inputfelt, og Escape sendes direkte til feltet. Hvis KY ikke
-    reagerer på ``press('Escape')``, sendes et eksplicit keydown/keyup-par
-    som fallback, og til sidst klikkes dropdownkontrollen som toggle.
-    """
-
+    """Minimer sagsvælgeren robust efter det entydige valg."""
     if page.is_closed():
-        raise RuntimeError("KY-siden blev lukket under minimering af sagsvælgeren.")
+        raise RuntimeError(
+            "KY-siden blev lukket under minimering af sagsvælgeren."
+        )
 
-    input_selector = KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_INPUT
-    exact_input_selector = "#command\\.tilfoejedeJournalnotater\\[0\\]\\.sager"
+    input_selector = (
+        KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_INPUT
+    )
+    exact_input_selector = (
+        "#command\\.tilfoejedeJournalnotater\\[0\\]\\.sager"
+    )
 
-    # Foretræk selector-konstanten, men brug det oplyste præcise ID som
-    # fallback, hvis den generelle selector ikke finder et synligt felt.
     inputs = page.locator(f"{input_selector}:visible")
     if await inputs.count() == 0:
-        inputs = page.locator(f"{exact_input_selector}:visible")
-
+        inputs = page.locator(
+            f"{exact_input_selector}:visible"
+        )
     if await inputs.count() == 0:
-        raise PlaywrightTimeoutError("Sagsvælgerens readonly-input blev ikke fundet.")
+        raise PlaywrightTimeoutError(
+            "Sagsvælgerens readonly-input blev ikke fundet."
+        )
 
     selected_input = inputs.last
-    await selected_input.wait_for(state="visible", timeout=timeout)
-
-    # Kontrollér igen på selve inputfeltet, at KY har registreret valget.
+    await selected_input.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
     await _journalnotat_vent_paa_inputvaerdi(
         page=page,
         timeout=timeout,
     )
-
     await selected_input.scroll_into_view_if_needed()
 
-    # Readonly-input kan stadig fokuseres. Escape sendes direkte til det
-    # element, som ejer teksten "1 sag valgt".
     try:
         await selected_input.focus()
     except Exception:
@@ -463,18 +630,12 @@ async def _journalnotat_minimer_sagsvaelger(
         )
 
     await selected_input.press("Escape")
-
     if await _journalnotat_er_sagsvaelger_minimeret(
         page=page,
         timeout=min(3_000, timeout),
     ):
-        print(
-            "Sagsdropdownen er minimeret med Escape på '1 sag valgt'-feltet.",
-            flush=True,
-        )
         return
 
-    # Fallback: send de native keyboard-events direkte fra inputfeltet.
     await selected_input.evaluate(
         """
         element => {
@@ -492,18 +653,19 @@ async def _journalnotat_minimer_sagsvaelger(
         }
         """
     )
-
     if await _journalnotat_er_sagsvaelger_minimeret(
         page=page,
         timeout=min(3_000, timeout),
     ):
-        print(
-            "Sagsdropdownen er minimeret med native Escape-events.",
-            flush=True,
-        )
         return
 
-    # Sidste fallback: input/dropdown fungerer som toggle i KY.
+    if await _journalnotat_klik_sagsvaelger_luk(page):
+        if await _journalnotat_er_sagsvaelger_minimeret(
+            page=page,
+            timeout=min(3_000, timeout),
+        ):
+            return
+
     dropdown = page.locator(dropdown_selector).first
     if await dropdown.count() > 0 and await dropdown.is_visible():
         await dropdown.click(
@@ -515,15 +677,11 @@ async def _journalnotat_minimer_sagsvaelger(
         page=page,
         timeout=min(3_000, timeout),
     ):
-        print(
-            "Sagsdropdownen er minimeret via dropdown-toggle.",
-            flush=True,
-        )
         return
 
     snapshot = await _journalnotat_sagsvaelger_snapshot(page)
     raise PlaywrightTimeoutError(
-        "Sagsdropdownen kunne ikke minimeres efter Escape på inputfeltet. "
+        "Sagsdropdownen kunne ikke minimeres. "
         f"Seneste status: {snapshot!r}."
     )
 
@@ -533,16 +691,21 @@ async def _journalnotat_vent_paa_inputvaerdi(
     timeout: int,
 ) -> None:
     """Vent på, at readonly-inputfeltet viser præcis '1 sag valgt'."""
-
-    input_selector = KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_INPUT
-    exact_input_selector = "#command\\.tilfoejedeJournalnotater\\[0\\]\\.sager"
+    input_selector = (
+        KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_INPUT
+    )
+    exact_input_selector = (
+        "#command\\.tilfoejedeJournalnotater\\[0\\]\\.sager"
+    )
     elapsed_ms = 0
     seneste_vaerdi = ""
 
     while elapsed_ms < timeout:
         inputs = page.locator(f"{input_selector}:visible")
         if await inputs.count() == 0:
-            inputs = page.locator(f"{exact_input_selector}:visible")
+            inputs = page.locator(
+                f"{exact_input_selector}:visible"
+            )
 
         if await inputs.count() > 0:
             field = inputs.last
@@ -564,13 +727,16 @@ async def _journalnotat_vent_paa_inputvaerdi(
     )
 
 
-async def _journalnotat_klik_sagsvaelger_luk(page: Page) -> bool:
-    """Find og klik det synlige X/lukkeelement i sagsdropdownen."""
-
-    search_selector = KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_SOEG
+async def _journalnotat_klik_sagsvaelger_luk(
+    page: Page,
+) -> bool:
+    """Find og aktivér et synligt lukkeelement i sagsdropdownen."""
+    search_selector = (
+        KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_SOEG
+    )
     searches = page.locator(f"{search_selector}:visible")
-
     roots: list[Locator] = []
+
     if await searches.count() > 0:
         search = searches.last
         for xpath in (
@@ -580,23 +746,22 @@ async def _journalnotat_klik_sagsvaelger_luk(page: Page) -> bool:
         ):
             try:
                 root = search.locator(xpath)
-                if await root.count() > 0 and await root.first.is_visible():
+                if (
+                    await root.count() > 0
+                    and await root.first.is_visible()
+                ):
                     roots.append(root.first)
             except Exception:
                 continue
 
-    # Sidste fallback er hele siden, men kandidater skal stadig være synlige
-    # og ligne et lukkeelement.
-    roots.append(page.locator("body"))
-
     candidate_selector = (
         "button.close:visible, a.close:visible, "
-        "[data-dismiss='dropdown']:visible, [data-toggle='dropdown-close']:visible, "
-        "[aria-label*='luk' i]:visible, [title*='luk' i]:visible, "
-        "[aria-label*='close' i]:visible, [title*='close' i]:visible, "
-        ".glyphicon-remove:visible, .glyphicon-remove-circle:visible, "
-        ".fa-times:visible, .fa-close:visible, .icon-remove:visible, "
-        "[class*='dropdown-close']:visible, [class*='close-dropdown']:visible"
+        "[data-dismiss='dropdown']:visible, "
+        "[aria-label*='luk' i]:visible, "
+        "[title*='luk' i]:visible, "
+        "[aria-label*='close' i]:visible, "
+        "[title*='close' i]:visible, "
+        ".glyphicon-remove:visible, .fa-times:visible"
     )
 
     for root in roots:
@@ -604,49 +769,10 @@ async def _journalnotat_klik_sagsvaelger_luk(page: Page) -> bool:
             candidates = root.locator(candidate_selector)
             for index in range(await candidates.count()):
                 candidate = candidates.nth(index)
-                if not await candidate.is_visible():
-                    continue
-                await candidate.click(timeout=ACTION_TIMEOUT_MS)
-                return True
-        except Exception:
-            continue
-
-    # Det viste KY-element er et stort X. Hvis elementet ikke har en kendt
-    # klasse, findes det via synlig tekst og klikkes kun inden for den menu,
-    # der indeholder sagsvælgerens søgefelt.
-    for root in roots[:-1]:
-        try:
-            controls = root.locator(
-                "button:visible, a:visible, [role='button']:visible, "
-                "span:visible, i:visible"
-            )
-            for index in range(await controls.count()):
-                control = controls.nth(index)
-                text = _journalnotat_normaliser_tekst(
-                    await control.inner_text()
-                ).casefold()
-                aria = _journalnotat_normaliser_tekst(
-                    await control.get_attribute("aria-label") or ""
-                ).casefold()
-                title = _journalnotat_normaliser_tekst(
-                    await control.get_attribute("title") or ""
-                ).casefold()
-                classes = _journalnotat_normaliser_tekst(
-                    await control.get_attribute("class") or ""
-                ).casefold()
-
-                is_close = (
-                    text in {"x", "×", "✕", "✖"}
-                    or "luk" in aria
-                    or "close" in aria
-                    or "luk" in title
-                    or "close" in title
-                    or "remove" in classes
-                    or "times" in classes
-                    or "close" in classes
-                )
-                if is_close:
-                    await control.click(timeout=ACTION_TIMEOUT_MS)
+                if await candidate.is_visible():
+                    await candidate.click(
+                        timeout=ACTION_TIMEOUT_MS
+                    )
                     return True
         except Exception:
             continue
@@ -659,7 +785,6 @@ async def _journalnotat_er_sagsvaelger_minimeret(
     timeout: int,
 ) -> bool:
     """Returnér True, hvis sagsvælgeren er stabilt skjult."""
-
     elapsed_ms = 0
     stable_hidden_checks = 0
 
@@ -688,22 +813,26 @@ async def _journalnotat_sagsvaelger_snapshot(
     page: Page,
 ) -> dict[str, object]:
     """Læs synlighed og udvidelsestilstand for sagsvælgeren."""
-
     search_fields = page.locator(
         f"{KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_SOEG}:visible"
     )
     result_rows = page.locator(
         f"{KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_FOERSTE_RESULTAT}:visible"
     )
-    container = page.locator(KYSelectors.Borgere.JOURNALNOTAT_DROPDOWN_CONTAINER).first
+    container = page.locator(
+        KYSelectors.Borgere.JOURNALNOTAT_DROPDOWN_CONTAINER
+    ).first
 
     aria_expanded: str | None = None
     container_classes = ""
-
     try:
         if await container.count() > 0:
-            aria_expanded = await container.get_attribute("aria-expanded")
-            container_classes = await container.get_attribute("class") or ""
+            aria_expanded = await container.get_attribute(
+                "aria-expanded"
+            )
+            container_classes = (
+                await container.get_attribute("class") or ""
+            )
     except Exception:
         pass
 
@@ -720,7 +849,6 @@ async def _journalnotat_vent_paa_sagsvaelger_minimeret(
     timeout: int,
 ) -> None:
     """Bagudkompatibel ventefunktion til sagsvælgerens lukkede tilstand."""
-
     if await _journalnotat_er_sagsvaelger_minimeret(
         page=page,
         timeout=timeout,
@@ -729,13 +857,15 @@ async def _journalnotat_vent_paa_sagsvaelger_minimeret(
 
     snapshot = await _journalnotat_sagsvaelger_snapshot(page)
     raise PlaywrightTimeoutError(
-        f"Sagsdropdownen blev ikke minimeret. Seneste status: {snapshot!r}."
+        "Sagsdropdownen blev ikke minimeret. "
+        f"Seneste status: {snapshot!r}."
     )
 
 
-async def _journalnotat_nulstil_skabelon(page: Page) -> None:
+async def _journalnotat_nulstil_skabelon(
+    page: Page,
+) -> None:
     """Ryd titel og nøgle fra et eventuelt tidligere afbrudt forsøg."""
-
     selectors = (
         KYSelectors.Borgere.JOURNALNOTAT_SKABELON_TITELFELT,
         KYSelectors.Borgere.JOURNALNOTAT_SKABELON_NOEGLEFELT,
@@ -769,16 +899,22 @@ async def _journalnotat_vaelg_skabelon(
     timeout: int,
 ) -> dict[str, str]:
     """Søg og vælg én journalnotatskabelon med eksakt titel."""
-
     controls = page.locator(
         f"{KYSelectors.Borgere.JOURNALNOTAT_SKABELON_KONTROL}:visible"
     )
     if await controls.count() == 0:
-        raise RuntimeError("Journalnotatets skabelonvælger blev ikke fundet.")
+        raise RuntimeError(
+            "Journalnotatets skabelonvælger blev ikke fundet."
+        )
 
     control = controls.last
-    await control.wait_for(state="visible", timeout=timeout)
-    await control.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
+    await control.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
+    await control.click(
+        timeout=min(ACTION_TIMEOUT_MS, timeout)
+    )
 
     searches = page.locator(
         f"{KYSelectors.Borgere.JOURNALNOTAT_SKABELONGRUPPE_SOEG}:visible"
@@ -789,7 +925,9 @@ async def _journalnotat_vaelg_skabelon(
             "input.skabelonvaelger-soeg[placeholder*='skabelon' i]:visible"
         )
     if await searches.count() == 0:
-        raise RuntimeError("Skabelonvælgerens søgefelt blev ikke fundet.")
+        raise RuntimeError(
+            "Skabelonvælgerens søgefelt blev ikke fundet."
+        )
 
     search = searches.last
     await search.fill(skabelon_titel)
@@ -801,9 +939,9 @@ async def _journalnotat_vaelg_skabelon(
         skabelon_titel=skabelon_titel,
         timeout=timeout,
     )
-
     selected_title = _journalnotat_normaliser_tekst(
-        await candidate.get_attribute("data-titel") or await candidate.inner_text()
+        await candidate.get_attribute("data-titel")
+        or await candidate.inner_text()
     )
     selected_key = (
         await candidate.get_attribute("data-noegle")
@@ -812,8 +950,9 @@ async def _journalnotat_vaelg_skabelon(
         or ""
     ).strip()
 
-    await candidate.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
-
+    await candidate.click(
+        timeout=min(ACTION_TIMEOUT_MS, timeout)
+    )
     await _journalnotat_vent_paa_skabelon_valgt(
         page=page,
         control=control,
@@ -822,7 +961,10 @@ async def _journalnotat_vaelg_skabelon(
         timeout=timeout,
     )
 
-    return {"titel": selected_title, "noegle": selected_key}
+    return {
+        "titel": selected_title,
+        "noegle": selected_key,
+    }
 
 
 async def _journalnotat_find_entydig_skabelon(
@@ -831,8 +973,9 @@ async def _journalnotat_find_entydig_skabelon(
     timeout: int,
 ) -> Locator:
     """Find én synlig skabelon med eksakt titel."""
-
-    wanted = _journalnotat_normaliser_tekst(skabelon_titel).casefold()
+    wanted = _journalnotat_normaliser_tekst(
+        skabelon_titel
+    ).casefold()
     elapsed_ms = 0
     selector = (
         "#journalnotat-group li[data-titel]:visible, "
@@ -845,6 +988,7 @@ async def _journalnotat_find_entydig_skabelon(
     while elapsed_ms < timeout:
         candidates = page.locator(selector)
         matches: list[Locator] = []
+
         for index in range(await candidates.count()):
             candidate = candidates.nth(index)
             try:
@@ -862,13 +1006,17 @@ async def _journalnotat_find_entydig_skabelon(
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
-            raise RuntimeError(f"Flere skabeloner matcher titlen {skabelon_titel!r}.")
+            raise RuntimeError(
+                "Flere skabeloner matcher titlen "
+                f"{skabelon_titel!r}."
+            )
 
         await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
 
     raise PlaywrightTimeoutError(
-        f"Journalnotatskabelonen {skabelon_titel!r} blev ikke fundet."
+        "Journalnotatskabelonen "
+        f"{skabelon_titel!r} blev ikke fundet."
     )
 
 
@@ -880,29 +1028,39 @@ async def _journalnotat_vent_paa_skabelon_valgt(
     timeout: int,
 ) -> None:
     """Vent på, at KY har registreret det valgte skabelonmatch."""
-
     elapsed_ms = 0
     wanted = selected_title.casefold()
 
     while elapsed_ms < timeout:
         try:
             values: list[str] = []
-            for attribute in ("value", "data-titel", "title"):
+            for attribute in (
+                "value",
+                "data-titel",
+                "title",
+            ):
                 value = await control.get_attribute(attribute)
                 if value:
-                    values.append(_journalnotat_normaliser_tekst(value))
+                    values.append(
+                        _journalnotat_normaliser_tekst(value)
+                    )
+
             try:
                 values.append(
-                    _journalnotat_normaliser_tekst(await control.input_value())
+                    _journalnotat_normaliser_tekst(
+                        await control.input_value()
+                    )
                 )
             except Exception:
                 pass
 
             title_registered = any(
-                value.casefold() == wanted or wanted in value.casefold()
+                value.casefold() == wanted
+                or wanted in value.casefold()
                 for value in values
                 if value
             )
+
             key_registered = False
             if selected_key:
                 key_registered = (
@@ -915,11 +1073,12 @@ async def _journalnotat_vent_paa_skabelon_valgt(
                 )
 
             visible_searches = page.locator(
-                "#journalnotat-group input.skabelonvaelger-soeg:visible"
+                "#journalnotat-group "
+                "input.skabelonvaelger-soeg:visible"
             )
-            if (title_registered or key_registered) and (
-                await visible_searches.count() == 0
-            ):
+            if (
+                title_registered or key_registered
+            ) and await visible_searches.count() == 0:
                 return
         except Exception:
             replacement = page.locator(
@@ -940,13 +1099,7 @@ async def _journalnotat_afslut_opgave(
     page: Page,
     timeout: int,
 ) -> None:
-    """Klik på Godkend og vent på, at KY har fjernet den afsluttede opgave.
-
-    Funktionen anvendes kun, når ``test=False``. Den accepterer kun den
-    konkrete Godkend-knap til afslutning af journalnotatopgaven. En eventuel
-    Gem-knap må ikke bruges som afslutningssignal.
-    """
-
+    """Klik på Godkend og vent på et sikkert afslutningssignal."""
     if page.is_closed():
         raise RuntimeError(
             "KY-siden er lukket, før journalnotatet kan godkendes."
@@ -956,7 +1109,10 @@ async def _journalnotat_afslut_opgave(
         "button[type='button'].btn.btn-primary.submit-opgave.margin-right"
         "[data-href='/opgave/handling/fortsaet']"
     )
-    pattern = re.compile(r"^\s*Godkend\s*$", re.IGNORECASE)
+    pattern = re.compile(
+        r"^\s*Godkend\s*$",
+        re.IGNORECASE,
+    )
     elapsed_ms = 0
 
     while elapsed_ms < timeout:
@@ -991,19 +1147,14 @@ async def _journalnotat_afslut_opgave(
         if len(matches) == 1:
             button = matches[0]
             before_url = page.url
-            before_opgave_id = await _journalnotat_hent_aktivt_opgave_id(page)
-
-            print()
-            print("=" * 70, flush=True)
-            print("PRODUKTIONSTILSTAND: KLIKKER PÅ GODKEND", flush=True)
-            print("Journalnotatet afsluttes nu.", flush=True)
-            print("=" * 70, flush=True)
+            before_opgave_id = (
+                await _journalnotat_hent_aktivt_opgave_id(page)
+            )
 
             await button.scroll_into_view_if_needed()
             await button.click(
                 timeout=min(ACTION_TIMEOUT_MS, timeout)
             )
-
             await _journalnotat_vent_paa_afslutning(
                 page=page,
                 button=button,
@@ -1031,19 +1182,7 @@ async def _journalnotat_vent_paa_afslutning(
     before_opgave_id: str,
     timeout: int,
 ) -> None:
-    """Vent på et sikkert signal om, at Godkend er behandlet af KY.
-
-    Afslutningen anses som behandlet, når mindst ét af følgende observeres:
-
-    - browserens URL ændres
-    - den klikkede knap bliver skjult eller fjernet
-    - ingen synlig Godkend-knap findes længere
-    - opgaveheaderens dynamiske opgave-id ændres eller forsvinder
-
-    Mønstret svarer til Send brev-flowet, hvor KY kan navigere, fjerne knappen
-    eller genopbygge opgave-DOM'en efter klik på Godkend.
-    """
-
+    """Vent på et sikkert signal om, at Godkend er behandlet af KY."""
     elapsed_ms = 0
 
     while elapsed_ms < timeout:
@@ -1052,19 +1191,24 @@ async def _journalnotat_vent_paa_afslutning(
 
         try:
             url_changed = page.url != before_url
-            godkend_gone = await page.locator(
-                f"{button_selector}:visible"
-            ).count() == 0
-
+            godkend_gone = (
+                await page.locator(
+                    f"{button_selector}:visible"
+                ).count()
+                == 0
+            )
             try:
                 clicked_button_gone = not await button.is_visible()
             except Exception:
                 clicked_button_gone = True
 
-            current_opgave_id = await _journalnotat_hent_aktivt_opgave_id(page)
+            current_opgave_id = (
+                await _journalnotat_hent_aktivt_opgave_id(page)
+            )
             opgave_changed = bool(before_opgave_id) and (
                 not current_opgave_id
-                or current_opgave_id.casefold() != before_opgave_id.casefold()
+                or current_opgave_id.casefold()
+                != before_opgave_id.casefold()
             )
 
             if (
@@ -1073,15 +1217,8 @@ async def _journalnotat_vent_paa_afslutning(
                 or clicked_button_gone
                 or opgave_changed
             ):
-                print(
-                    "Godkend-klikket er behandlet, og journalnotatopgaven "
-                    "er fjernet eller genopbygget af KY.",
-                    flush=True,
-                )
                 return
         except Exception:
-            # Navigation eller en fuld DOM-udskiftning efter klik betyder,
-            # at den tidligere opgave ikke længere kan aflæses.
             return
 
         await page.wait_for_timeout(POLL_INTERVAL_MS)
@@ -1098,7 +1235,6 @@ async def _journalnotat_hent_aktivt_opgave_id(
     page: Page,
 ) -> str:
     """Læs det dynamiske opgave-id fra den aktuelle opgaveheader."""
-
     if page.is_closed():
         return ""
 
@@ -1106,7 +1242,6 @@ async def _journalnotat_hent_aktivt_opgave_id(
         "div#opgave-header "
         "a.undock_panel_button[data-opgave-id]:visible"
     )
-
     if await buttons.count() == 0:
         return ""
 
@@ -1118,15 +1253,18 @@ async def _journalnotat_hent_aktivt_opgave_id(
     except Exception:
         return ""
 
+
 def _journalnotat_input_eller_env(
     value: str | None,
     env_name: str,
     feltnavn: str,
 ) -> str:
     """Brug funktionsinputtet eller hent værdien fra projektets .env-fil."""
-
     if value is not None and str(value).strip():
-        return _journalnotat_paakraevet_tekst(str(value), feltnavn)
+        return _journalnotat_paakraevet_tekst(
+            str(value),
+            feltnavn,
+        )
 
     env_value = os.getenv(env_name, "").strip()
     if not env_value:
@@ -1135,20 +1273,31 @@ def _journalnotat_input_eller_env(
             f"{env_name} til {ENV_FILE}."
         )
 
-    return _journalnotat_paakraevet_tekst(env_value, feltnavn)
+    return _journalnotat_paakraevet_tekst(
+        env_value,
+        feltnavn,
+    )
 
 
-def _journalnotat_paakraevet_tekst(value: str, feltnavn: str) -> str:
+def _journalnotat_paakraevet_tekst(
+    value: str,
+    feltnavn: str,
+) -> str:
     """Trim et obligatorisk tekstinput."""
-
     normaliseret = _journalnotat_normaliser_tekst(value)
     if not normaliseret:
-        raise ValueError(f"{feltnavn} må ikke være tomt.")
+        raise ValueError(
+            f"{feltnavn} må ikke være tomt."
+        )
     return normaliseret
 
 
-def _journalnotat_normaliser_tekst(value: str) -> str:
+def _journalnotat_normaliser_tekst(
+    value: object,
+) -> str:
     """Saml whitespace og trim tekst."""
-
-    return re.sub(r"\s+", " ", str(value or "")).strip()
-
+    return re.sub(
+        r"\s+",
+        " ",
+        str(value or ""),
+    ).strip()
