@@ -422,16 +422,31 @@ async def _journalnotat_find_entydig_sag(
     primaerpart_navn: str,
     timeout: int,
 ) -> Locator:
-    """Find én sag, hvor sagstekst og primærpart matcher entydigt."""
+    """Find præcis én aktiv sag med korrekt SagsID og primærpart.
+
+    Kun rækker med data-tilstand="aktiv" kan vælges.
+
+    ``sag`` matches mod kolonnen SagsID.
+    ``primaerpart_navn`` matches mod navnene i kolonnen
+    Udb. modtager / Primærpart.
+
+    Funktionen returnerer rækkens Locator, når præcis én aktiv række
+    matcher. Funktionen stopper sikkert, hvis ingen eller flere rækker
+    matcher.
+    """
     wanted_sag = _journalnotat_normaliser_tekst(
         sag
     ).casefold()
+
     wanted_name = _journalnotat_normaliser_navn(
         primaerpart_navn
     )
 
     if not wanted_sag:
-        raise ValueError("sag må ikke være tom.")
+        raise ValueError(
+            "sag må ikke være tom."
+        )
+
     if not wanted_name:
         raise ValueError(
             "primaerpart_navn må ikke være tomt."
@@ -440,17 +455,29 @@ async def _journalnotat_find_entydig_sag(
     table = page.locator(
         "#sagsvaelgertable:visible"
     ).last
+
     await table.wait_for(
         state="visible",
         timeout=timeout,
     )
 
-    header_cells = table.locator("thead th")
+    header_cells = table.locator(
+        "thead th"
+    )
+
     headers = [
         _journalnotat_normaliser_overskrift(
             await header_cells.nth(index).inner_text()
         )
-        for index in range(await header_cells.count())
+        for index in range(
+            await header_cells.count()
+        )
+    ]
+
+    sagsid_indexes = [
+        index
+        for index, header in enumerate(headers)
+        if header == "sagsid"
     ]
 
     primaerpart_indexes = [
@@ -461,6 +488,14 @@ async def _journalnotat_find_entydig_sag(
             and "primaerpart" in header
         )
     ]
+
+    if len(sagsid_indexes) != 1:
+        raise RuntimeError(
+            "Journalnotatets sagstabel mangler en entydig "
+            "kolonne med overskriften 'SagsID'. "
+            f"Fundne kolonner={headers!r}."
+        )
+
     if len(primaerpart_indexes) != 1:
         raise RuntimeError(
             "Journalnotatets sagstabel mangler en entydig kolonne "
@@ -468,80 +503,161 @@ async def _journalnotat_find_entydig_sag(
             f"Fundne kolonner={headers!r}."
         )
 
+    sagsid_index = sagsid_indexes[0]
     primaerpart_index = primaerpart_indexes[0]
+
     elapsed_ms = 0
     diagnostic: list[dict[str, str]] = []
 
     while elapsed_ms < timeout:
+        # VIGTIGT:
+        # Passive rækker ignoreres altid, også hvis checkboxen
+        # "Passive" ved en fejl er markeret.
         rows = table.locator(
-            "tbody tr:not([style*='display: none']):visible"
+            "tbody tr.table-row"
+            '[data-tilstand="aktiv"]:visible'
         )
+
         matches: list[Locator] = []
         diagnostic = []
 
-        for index in range(await rows.count()):
+        for index in range(
+            await rows.count()
+        ):
             row = rows.nth(index)
+
             try:
                 if not await row.is_visible():
                     continue
 
-                row_text = _journalnotat_normaliser_tekst(
-                    await row.inner_text()
-                )
-                if wanted_sag not in row_text.casefold():
-                    continue
-
                 cells = row.locator("td")
-                if await cells.count() <= primaerpart_index:
+
+                required_cell_count = max(
+                    sagsid_index,
+                    primaerpart_index,
+                ) + 1
+
+                if (
+                    await cells.count()
+                    < required_cell_count
+                ):
                     raise RuntimeError(
-                        "En sagsrække mangler cellen for "
+                        "En aktiv sagsrække mangler enten "
+                        "SagsID-cellen eller cellen for "
                         "'Udb. modtager / Primærpart'."
                     )
 
-                primaerpart_text = _journalnotat_normaliser_tekst(
-                    await cells.nth(
-                        primaerpart_index
-                    ).inner_text()
+                sagsid_text = (
+                    _journalnotat_normaliser_tekst(
+                        await cells.nth(
+                            sagsid_index
+                        ).inner_text()
+                    )
                 )
-                primaerpart_names = [
-                    _journalnotat_normaliser_navn(value)
-                    for value in primaerpart_text.split("/")
-                    if _journalnotat_normaliser_navn(value)
-                ]
+
+                primaerpart_text = (
+                    _journalnotat_normaliser_tekst(
+                        await cells.nth(
+                            primaerpart_index
+                        ).inner_text()
+                    )
+                )
 
                 diagnostic.append(
                     {
-                        "sag": row_text,
+                        "sagsid": sagsid_text,
+                        "tilstand": (
+                            await row.get_attribute(
+                                "data-tilstand"
+                            )
+                            or ""
+                        ),
                         "primaerpart": primaerpart_text,
                     }
                 )
 
-                if wanted_name in primaerpart_names:
-                    matches.append(row)
+                # SagsID-feltet kan eksempelvis indeholde
+                # "HTF-XXXXXX", mens søgeværdien er "HTF".
+                if (
+                    wanted_sag
+                    not in sagsid_text.casefold()
+                ):
+                    continue
+
+                # Kolonnen indeholder typisk:
+                #
+                #   Udbetalingsmodtager / Primærpart
+                #
+                # Begge sider normaliseres og sammenlignes
+                # separat med Navn fra Personoplysninger.
+                primaerpart_names = [
+                    _journalnotat_normaliser_navn(
+                        value
+                    )
+                    for value in primaerpart_text.split("/")
+                    if (
+                        _journalnotat_normaliser_navn(
+                            value
+                        )
+                        and (
+                            _journalnotat_normaliser_navn(
+                                value
+                            )
+                            != "-"
+                        )
+                    )
+                ]
+
+                if wanted_name not in primaerpart_names:
+                    continue
+
+                matches.append(row)
+
             except RuntimeError:
                 raise
             except Exception:
+                # En midlertidigt ustabil DOM-række må ikke
+                # føre til et forkert valg. Rækken ignoreres,
+                # og tabellen undersøges igen i næste loop.
                 continue
 
         if len(matches) == 1:
-            return matches[0]
+            selected_row = matches[0]
+
+            selected_state = (
+                await selected_row.get_attribute(
+                    "data-tilstand"
+                )
+                or ""
+            ).strip().casefold()
+
+            if selected_state != "aktiv":
+                raise RuntimeError(
+                    "Den fundne sagsrække er ikke aktiv. "
+                    "Ingen sag vælges."
+                )
+
+            return selected_row
 
         if len(matches) > 1:
             raise RuntimeError(
-                "Flere sager matcher både "
-                f"{sag!r} og navnet fra Personoplysninger. "
-                "Ingen sag vælges."
+                "Flere aktive sager matcher både "
+                f"SagsID-søgningen {sag!r} og Navn fra "
+                "Personoplysninger. Ingen sag vælges. "
+                f"Matchende aktive rækker={diagnostic!r}."
             )
 
-        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        await page.wait_for_timeout(
+            POLL_INTERVAL_MS
+        )
         elapsed_ms += POLL_INTERVAL_MS
 
     raise PlaywrightTimeoutError(
-        "Ingen sag matchede både "
-        f"{sag!r} og navnet fra Personoplysninger. "
-        f"Synlige kandidater={diagnostic!r}."
+        "Ingen aktiv sag matchede både "
+        f"SagsID-søgningen {sag!r} og Navn fra "
+        "Personoplysninger. "
+        f"Synlige aktive kandidater={diagnostic!r}."
     )
-
 
 def _journalnotat_normaliser_overskrift(
     value: object,
