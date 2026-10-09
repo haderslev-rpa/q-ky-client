@@ -66,6 +66,7 @@ async def opret_journalnotat(
     passive: bool = True,
     test: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
+    nummerplade: str | None = None,
 ) -> JournalnotatResultat:
     """Overtag og udfyld journalnotatopgaven fra opstart_opgave.
 
@@ -89,6 +90,7 @@ async def opret_journalnotat(
         aktive=aktive,
         passive=passive,
         timeout=timeout,
+        nummerplade=nummerplade,
     )
 
     afsluttet = False
@@ -160,6 +162,7 @@ async def udfyld_aabnet_journalnotat(
     aktive: bool = True,
     passive: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
+    nummerplade: str | None = None,
 ) -> UdfyldtJournalnotat:
     """Udfyld en journalnotatopgave, som allerede er åbnet."""
     if page.is_closed():
@@ -182,6 +185,10 @@ async def udfyld_aabnet_journalnotat(
         "primaerpart_navn",
     )
 
+    nummerplade = str(nummerplade or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]+", nummerplade) or nummerplade == "XXXX":
+        raise ValueError("nummerplade skal angives. Journalnotatet godkendes ikke.")
+
     await _journalnotat_vent_paa_formular(
         page=page,
         timeout=timeout,
@@ -199,6 +206,12 @@ async def udfyld_aabnet_journalnotat(
     valgt_skabelon = await _journalnotat_vaelg_skabelon(
         page=page,
         skabelon_titel=journalnotatskabelon,
+        timeout=timeout,
+    )
+
+    await _journalnotat_indsaet_nummerplade(
+        page=page,
+        nummerplade=nummerplade,
         timeout=timeout,
     )
 
@@ -1396,3 +1409,77 @@ def _journalnotat_normaliser_tekst(
         " ",
         str(value or ""),
     ).strip()
+
+
+async def _journalnotat_indsaet_nummerplade(
+    page: Page,
+    nummerplade: str,
+    timeout: int,
+) -> None:
+    """Erstat kun xxxx og synkroniser TinyMCE med formularfeltet."""
+    nummerplade = str(nummerplade or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]+", nummerplade) or nummerplade == "XXXX":
+        raise ValueError("Nummerpladen mangler eller er ugyldig. Ingen godkendelse.")
+    editor_id = "tilfoejedeJournalnotater0.notat"
+    elapsed_ms = 0
+    while elapsed_ms < timeout:
+        if page.is_closed():
+            raise RuntimeError("KY-siden blev lukket før tekstudfyldning.")
+        kandidater = []
+        for frame in page.frames:
+            klar = await frame.evaluate(
+                """id => {
+                    const e = window.tinymce?.get(id);
+                    const b = e?.getBody();
+                    return Boolean(e?.initialized && b &&
+                        b.getAttribute('data-id') === id &&
+                        b.getClientRects().length && b.innerText.trim());
+                }""", editor_id,
+            )
+            if klar:
+                kandidater.append(frame)
+        if len(kandidater) > 1:
+            raise RuntimeError("Flere editorer matcher. Ingen tekst ændres.")
+        if kandidater:
+            await kandidater[0].evaluate(
+                r"""({id, plade}) => {
+                    const e = window.tinymce.get(id);
+                    const body = e.getBody();
+                    const original = body.innerText;
+                    if ((original.match(/\bxxxx\b/gi) || []).length !== 1) {
+                        throw new Error('Forventede præcis én xxxx-pladsholder.');
+                    }
+                    const kopi = body.cloneNode(true);
+                    const walker = body.ownerDocument.createTreeWalker(kopi, 4);
+                    const matches = [];
+                    while (walker.nextNode()) {
+                        if (/\bxxxx\b/i.test(walker.currentNode.nodeValue)) {
+                            matches.push(walker.currentNode);
+                        }
+                    }
+                    if (matches.length !== 1) {
+                        throw new Error('Pladsholderen er ikke entydig i tekstnoder.');
+                    }
+                    matches[0].nodeValue = matches[0].nodeValue.replace(
+                        /\bxxxx\b/i, () => plade
+                    );
+                    e.undoManager.transact(() => e.setContent(kopi.innerHTML));
+                    e.setDirty(true);
+                    e.fire('input');
+                    e.fire('change');
+                    // save synkroniserer textarea. Det godkender ikke KY-opgaven.
+                    e.save();
+                    const actual = e.getBody().innerText;
+                    const expected = original.replace(/\bxxxx\b/i, () => plade);
+                    if (actual !== expected || /\bxxxx\b/i.test(actual) ||
+                        e.getElement().value !== e.getContent()) {
+                        throw new Error('Tekst eller formularfelt kunne ikke verificeres.');
+                    }
+                }""",
+                {"id": editor_id, "plade": nummerplade},
+            )
+            print("Nummerpladen er indsat og formularfeltet verificeret.", flush=True)
+            return
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+    raise PlaywrightTimeoutError("Journalnotatets TinyMCE-editor blev ikke klar.")
