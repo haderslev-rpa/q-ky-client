@@ -1155,7 +1155,6 @@ async def udfyld_send_brev_ventetrin(
 
     Funktionen kan også kaldes separat på et allerede åbent ventetrin.
     """
-
     if page.is_closed():
         raise RuntimeError("KY-siden er lukket.")
 
@@ -1170,8 +1169,11 @@ async def udfyld_send_brev_ventetrin(
 
     status = status.strip()
 
+    # KY-elementet har id="processConditions0.statusStr" og
+    # name="processConditions[0].statusStr". Name-selectoren undgår,
+    # at punktummet i id'et skal escapes.
     status_felt = page.locator(
-        "select#processCondition0\\.statusStr:visible"
+        "select[name='processConditions[0].statusStr']:visible"
     )
 
     await expect(status_felt).to_have_count(1, timeout=timeout)
@@ -1181,6 +1183,13 @@ async def udfyld_send_brev_ventetrin(
     await expect(frist_felt).to_have_count(1, timeout=timeout)
     await expect(frist_felt).to_be_visible(timeout=timeout)
     await expect(frist_felt).to_be_editable(timeout=timeout)
+
+    status_option = status_felt.locator(
+        f"option[value='{status}']"
+    )
+    await expect(status_option).to_have_count(1, timeout=timeout)
+
+    status_tekst = _normaliser(await status_option.inner_text())
 
     input_type = (
         await frist_felt.get_attribute("type") or "text"
@@ -1196,47 +1205,55 @@ async def udfyld_send_brev_ventetrin(
         )
 
     logger.info(
-        "Udfylder ventetrin: status=%r, frist=%r.",
+        "Udfylder ventetrin: status=%r, statustekst=%r, frist=%r.",
         status,
+        status_tekst,
         frist_tekst,
     )
 
-    await status_felt.select_option(
+    valgte_vaerdier = await status_felt.select_option(
         value=status,
         timeout=timeout,
     )
 
-    await status_felt.dispatch_event(
-        "change",
-        timeout=timeout,
-    )
+    if valgte_vaerdier != [status]:
+        raise RuntimeError(
+            "KY returnerede en uventet værdi efter statusvalget. "
+            f"Forventet={[status]!r}, faktisk={valgte_vaerdier!r}."
+        )
 
-    await frist_felt.fill(
-        frist_tekst,
-        timeout=timeout,
-    )
+    # select_option sender normalt events selv. De sendes igen eksplicit,
+    # fordi KY kan have egen JavaScript-logik bundet til feltet.
+    await status_felt.dispatch_event("input", timeout=timeout)
+    await status_felt.dispatch_event("change", timeout=timeout)
 
-    await frist_felt.dispatch_event(
-        "change",
-        timeout=timeout,
-    )
+    await expect(status_felt).to_have_value(status, timeout=timeout)
+    faktisk_status = await status_felt.input_value()
 
-    await frist_felt.press(
-        "Tab",
-        timeout=timeout,
-    )
+    if faktisk_status != status:
+        raise RuntimeError(
+            "KY beholdt ikke den valgte ventetrinsstatus. "
+            f"Forventet={status!r}, faktisk={faktisk_status!r}."
+        )
 
-    await expect(status_felt).to_have_value(
-        status,
-        timeout=timeout,
-    )
+    await frist_felt.fill(frist_tekst, timeout=timeout)
+    await frist_felt.dispatch_event("input", timeout=timeout)
+    await frist_felt.dispatch_event("change", timeout=timeout)
+    await frist_felt.press("Tab", timeout=timeout)
 
     await expect(frist_felt).to_have_value(
         frist_tekst,
         timeout=timeout,
     )
 
+    logger.info(
+        "Ventetrin udfyldt: status=%r (%s), frist=%r.",
+        faktisk_status,
+        status_tekst,
+        frist_tekst,
+    )
+
     return {
-        "status": status,
+        "status": faktisk_status,
         "frist": frist_tekst,
     }
