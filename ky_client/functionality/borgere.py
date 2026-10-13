@@ -2573,6 +2573,7 @@ class ModtagPostDokumentResultat(TypedDict):
     dokumenttekst: str
     dokument_url: str
     aabnet_url: str
+    sags_id_fra_opgave: str
 
 
 class ModtagPostResultat(TypedDict):
@@ -2586,6 +2587,7 @@ class ModtagPostResultat(TypedDict):
     dokumenttekst: str
     dokument_url: str
     aabnet_url: str
+    sags_id_fra_opgave: str
     sag: str
     sag_behandlet: bool
     sag_id: str
@@ -2602,6 +2604,86 @@ class ValgtSag(TypedDict):
 
     sag_id: str
     sagstekst: str
+
+
+# START: _modtag_post_hent_sags_id_fra_opgave
+async def _modtag_post_hent_sags_id_fra_opgave(
+    page: Page,
+    timeout: int,
+) -> str:
+    """Læs det viste SagsID fra den åbne Modtag post-opgave.
+
+    KY viser værdien i feltet ``input#sags`` med firkantede parenteser,
+    eksempelvis ``[HTF-ZF6C9P]``. Funktionen returnerer værdien uden
+    parenteser, eksempelvis ``HTF-ZF6C9P``.
+    """
+    sagsfelter = page.locator(
+        "input#sags[name='sags'][readonly]"
+    )
+
+    await sagsfelter.first.wait_for(
+        state="attached",
+        timeout=timeout,
+    )
+
+    synlige_felter: list[Locator] = []
+
+    for index in range(await sagsfelter.count()):
+        felt = sagsfelter.nth(index)
+
+        try:
+            if await felt.is_visible():
+                synlige_felter.append(felt)
+        except PlaywrightError:
+            continue
+
+    if len(synlige_felter) != 1:
+        raise RuntimeError(
+            "Modtag post-opgaven skal indeholde præcis ét synligt "
+            "SagsID-felt. "
+            f"Antal synlige felter={len(synlige_felter)}."
+        )
+
+    raavaerdi = _modtag_post_normaliser_tekst(
+        await synlige_felter[0].input_value()
+    )
+
+    if not raavaerdi:
+        raise RuntimeError(
+            "Modtag post-opgavens SagsID-felt er tomt."
+        )
+
+    match = re.fullmatch(
+        r"\[\s*([^\[\]]+?)\s*\]",
+        raavaerdi,
+    )
+
+    if match is None:
+        raise RuntimeError(
+            "Modtag post-opgavens SagsID har et uventet format. "
+            f"Værdi={raavaerdi!r}."
+        )
+
+    sags_id = _modtag_post_normaliser_tekst(
+        match.group(1)
+    )
+
+    if not re.fullmatch(
+        r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+",
+        sags_id,
+    ):
+        raise RuntimeError(
+            "Modtag post-opgavens normaliserede SagsID er ugyldigt. "
+            f"Værdi={sags_id!r}."
+        )
+
+    logger.info(
+        "SagsID er aflæst fra den åbne Modtag post-opgave: %r.",
+        sags_id,
+    )
+
+    return sags_id
+# SLUT: _modtag_post_hent_sags_id_fra_opgave
 
 
 async def modtag_post_dokument(
@@ -2634,6 +2716,7 @@ async def modtag_post_dokument(
         "dokumenttekst": resultat["dokumenttekst"],
         "dokument_url": resultat["dokument_url"],
         "aabnet_url": resultat["aabnet_url"],
+        "sags_id_fra_opgave": resultat["sags_id_fra_opgave"],
     }
 
     if not dokument_resultat["fundet"]:
@@ -2714,6 +2797,11 @@ async def modtag_post(
         timeout=timeout,
     )
 
+    sags_id_fra_opgave = await _modtag_post_hent_sags_id_fra_opgave(
+        page=page,
+        timeout=timeout,
+    )
+
     resultat: ModtagPostResultat = {
         "dokument": dokument,
         "dokument_behandlet": False,
@@ -2723,6 +2811,7 @@ async def modtag_post(
         "dokumenttekst": "",
         "dokument_url": "",
         "aabnet_url": "",
+        "sags_id_fra_opgave": sags_id_fra_opgave,
         "sag": sag,
         "sag_behandlet": False,
         "sag_id": "",
