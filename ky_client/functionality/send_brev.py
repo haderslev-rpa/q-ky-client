@@ -1149,39 +1149,94 @@ async def udfyld_send_brev_ventetrin(
     """Udfyld det åbne ventetrin uden at trykke på Godkend.
 
     Processen leverer datoen og locatoren til det verificerede Frist-input.
-    Eksempel på statusværdi: DEADLINE_EXCEEDED.
+
+    Eksempel på statusværdi:
+        DEADLINE_EXCEEDED
+
     Funktionen kan også kaldes separat på et allerede åbent ventetrin.
     """
+
     if page.is_closed():
         raise RuntimeError("KY-siden er lukket.")
+
     if not isinstance(frist, date):
         raise TypeError("frist skal være en date.")
+
     if not isinstance(status, str) or not status.strip():
         raise ValueError("status må ikke være tom.")
+
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
         raise ValueError("timeout skal være et positivt heltal.")
+
     status = status.strip()
+
     status_felt = page.locator(
-        f"{KYSelectors.Borgere.SEND_BREV_VENTETRIN_STATUS}:visible"
+        "select#processCondition0\\.statusStr:visible"
     )
+
     await expect(status_felt).to_have_count(1, timeout=timeout)
     await expect(status_felt).to_be_visible(timeout=timeout)
     await expect(status_felt).to_be_enabled(timeout=timeout)
+
     await expect(frist_felt).to_have_count(1, timeout=timeout)
     await expect(frist_felt).to_be_visible(timeout=timeout)
     await expect(frist_felt).to_be_editable(timeout=timeout)
-    input_type = (await frist_felt.get_attribute("type") or "text").casefold()
+
+    input_type = (
+        await frist_felt.get_attribute("type") or "text"
+    ).casefold()
+
     if input_type == "date":
         frist_tekst = frist.isoformat()
     elif input_type == "text":
         frist_tekst = frist.strftime("%d-%m-%Y")
     else:
-        raise RuntimeError(f"Fristfeltets inputtype understøttes ikke: {input_type!r}.")
-    logger.info("Udfylder ventetrin: status=%r, frist=%r.", status, frist_tekst)
-    await status_felt.select_option(value=status, timeout=timeout)
-    await frist_felt.fill(frist_tekst, timeout=timeout)
-    await frist_felt.dispatch_event("change", timeout=timeout)
-    await frist_felt.press("Tab", timeout=timeout)
-    await expect(status_felt).to_have_value(status, timeout=timeout)
-    await expect(frist_felt).to_have_value(frist_tekst, timeout=timeout)
-    return {"status": status, "frist": frist_tekst}
+        raise RuntimeError(
+            f"Fristfeltets inputtype understøttes ikke: {input_type!r}."
+        )
+
+    logger.info(
+        "Udfylder ventetrin: status=%r, frist=%r.",
+        status,
+        frist_tekst,
+    )
+
+    await status_felt.select_option(
+        value=status,
+        timeout=timeout,
+    )
+
+    await status_felt.dispatch_event(
+        "change",
+        timeout=timeout,
+    )
+
+    await frist_felt.fill(
+        frist_tekst,
+        timeout=timeout,
+    )
+
+    await frist_felt.dispatch_event(
+        "change",
+        timeout=timeout,
+    )
+
+    await frist_felt.press(
+        "Tab",
+        timeout=timeout,
+    )
+
+    await expect(status_felt).to_have_value(
+        status,
+        timeout=timeout,
+    )
+
+    await expect(frist_felt).to_have_value(
+        frist_tekst,
+        timeout=timeout,
+    )
+
+    return {
+        "status": status,
+        "frist": frist_tekst,
+    }
