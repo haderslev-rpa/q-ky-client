@@ -104,6 +104,8 @@ class KYSelectors:
             "div.opgave-header span"
         )
 
+        MODTAG_POST_SAGSID = ( "input#sags[name='sags'][readonly]" )
+
         # Modtag post: Dokumenter
         MODTAG_POST_DOKUMENTER_TOGGLE = (
             "a[data-toggle='collapse'][href='#vedhaeftninger']"
@@ -232,6 +234,12 @@ class KYSelectors:
         SEND_BREV_STANDARD_BILAG_SOEG = (
             "input.skabelonvaelger-soeg[placeholder='Søg efter vedhæftning']"
         )
+
+        # Send brev - ventetrin
+        SEND_BREV_VENTETRIN_STATUS = (
+            "select[name='processConditions[0].statusStr']"
+        )
+
 
         UBEHANDLEDE_OPGAVER_TABLE = "table#ubehandlede-opgaver"
 

@@ -8,15 +8,19 @@ Dette modul forventer, at Send brev-opgaven allerede er åbnet.
 from __future__ import annotations
 
 import re
+import logging
+from datetime import date
 from collections.abc import Sequence
 from typing import TypedDict
 
-from playwright.async_api import Locator, Page
+from playwright.async_api import Locator, Page, expect
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from ky_client.functionality.borgere import OpstartOpgaveCheckpoint
 
 from ..selectors import KYSelectors
+
+logger = logging.getLogger(__name__)
 
 ACTION_TIMEOUT_MS = 30_000
 OPGAVE_TIMEOUT_MS = 120_000
@@ -68,6 +72,9 @@ async def send_brev(
     test: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
     forventet_vedroerer: str | None = None,
+    ventetrin_status: str | None = None,
+    ventetrin_frist: date | None = None,
+    ventetrin_frist_felt: Locator | None = None,
 ) -> SendBrevResultat:
     """Overtag og udfyld Send brev-opgaven fra opstart_opgave.
 
@@ -75,6 +82,18 @@ async def send_brev(
     ``checkpoint`` skal være resultatet fra den fælles ``opstart_opgave``.
     Ved ``test=True`` klikkes der ikke på Godkend, og brevet sendes ikke.
     """
+    # Valider alle ventetrinsparametre før nogen permanente handlinger.
+    ventetrin_requested = any(
+        value is not None
+        for value in (ventetrin_status, ventetrin_frist, ventetrin_frist_felt)
+    )
+    if ventetrin_requested:
+        if not isinstance(ventetrin_status, str) or not ventetrin_status.strip():
+            raise ValueError("ventetrin_status mangler.")
+        if not isinstance(ventetrin_frist, date):
+            raise TypeError("ventetrin_frist skal være en date.")
+        if ventetrin_frist_felt is None:
+            raise ValueError("ventetrin_frist_felt skal være dato-inputtets locator.")
     _valider_send_brev_checkpoint(checkpoint)
     valgt_sag = await vaelg_sag_til_brev(
         page=page,
@@ -98,6 +117,16 @@ async def send_brev(
         )
         await vent_efter_bilag_dropdown_er_minimeret(page=page, timeout=timeout)
     await saet_fysisk_post(page=page, fysisk_post=fysisk_post, timeout=timeout)
+    # Dette kald kræver, at ventetrinnet er tilgængeligt før Godkend.
+    # Hvis det først vises efter afsendelse, stopper vi uden at sende.
+    if ventetrin_requested:
+        await udfyld_send_brev_ventetrin(
+            page=page,
+            frist_felt=ventetrin_frist_felt,
+            frist=ventetrin_frist,
+            status=ventetrin_status,
+            timeout=timeout,
+        )
     sendt = await godkend_og_send_brev(page=page, test=test, timeout=timeout)
     return {
         "opgave_id": checkpoint["opgave_id"],
@@ -1101,3 +1130,58 @@ async def _set_checkbox(locator: Locator, checked: bool) -> None:
 
 def _normaliser(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+class VentetrinResultat(TypedDict):
+    """Kontrollerede værdier fra det åbne ventetrin."""
+    status: str
+    frist: str
+
+
+async def udfyld_send_brev_ventetrin(
+    page: Page,
+    *,
+    frist_felt: Locator,
+    frist: date,
+    status: str,
+    timeout: int = OPGAVE_TIMEOUT_MS,
+) -> VentetrinResultat:
+    """Udfyld det åbne ventetrin uden at trykke på Godkend.
+
+    Processen leverer datoen og locatoren til det verificerede Frist-input.
+    Eksempel på statusværdi: DEADLINE_EXCEEDED.
+    Funktionen kan også kaldes separat på et allerede åbent ventetrin.
+    """
+    if page.is_closed():
+        raise RuntimeError("KY-siden er lukket.")
+    if not isinstance(frist, date):
+        raise TypeError("frist skal være en date.")
+    if not isinstance(status, str) or not status.strip():
+        raise ValueError("status må ikke være tom.")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise ValueError("timeout skal være et positivt heltal.")
+    status = status.strip()
+    status_felt = page.locator(
+        f"{KYSelectors.Borgere.SEND_BREV_VENTETRIN_STATUS}:visible"
+    )
+    await expect(status_felt).to_have_count(1, timeout=timeout)
+    await expect(status_felt).to_be_visible(timeout=timeout)
+    await expect(status_felt).to_be_enabled(timeout=timeout)
+    await expect(frist_felt).to_have_count(1, timeout=timeout)
+    await expect(frist_felt).to_be_visible(timeout=timeout)
+    await expect(frist_felt).to_be_editable(timeout=timeout)
+    input_type = (await frist_felt.get_attribute("type") or "text").casefold()
+    if input_type == "date":
+        frist_tekst = frist.isoformat()
+    elif input_type == "text":
+        frist_tekst = frist.strftime("%d-%m-%Y")
+    else:
+        raise RuntimeError(f"Fristfeltets inputtype understøttes ikke: {input_type!r}.")
+    logger.info("Udfylder ventetrin: status=%r, frist=%r.", status, frist_tekst)
+    await status_felt.select_option(value=status, timeout=timeout)
+    await frist_felt.fill(frist_tekst, timeout=timeout)
+    await frist_felt.dispatch_event("change", timeout=timeout)
+    await frist_felt.press("Tab", timeout=timeout)
+    await expect(status_felt).to_have_value(status, timeout=timeout)
+    await expect(frist_felt).to_have_value(frist_tekst, timeout=timeout)
+    return {"status": status, "frist": frist_tekst}
