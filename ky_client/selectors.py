@@ -239,6 +239,9 @@ class KYSelectors:
         SEND_BREV_VENTETRIN_STATUS = (
             "select[name='processConditions[0].statusStr']"
         )
+        SEND_BREV_VENTETRIN_FRIST = (
+            "input[name='processConditions[0].timeLimit']"
+        )
 
 
         UBEHANDLEDE_OPGAVER_TABLE = "table#ubehandlede-opgaver"
