@@ -67,6 +67,7 @@ async def opret_journalnotat(
     test: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
     nummerplade: str | None = None,
+    journalnotat_tekst: str | None = None,
 ) -> JournalnotatResultat:
     """Overtag og udfyld journalnotatopgaven fra opstart_opgave.
 
@@ -100,6 +101,11 @@ async def opret_journalnotat(
             flush=True,
         )
     else:
+        await _journalnotat_kontroller_tekst(
+            page=page,
+            journalnotat_tekst=journalnotat_tekst,
+            timeout=timeout,
+        )
         await _journalnotat_afslut_opgave(
             page=page,
             timeout=timeout,
@@ -163,6 +169,7 @@ async def udfyld_aabnet_journalnotat(
     passive: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
     nummerplade: str | None = None,
+    journalnotat_tekst: str | None = None,
 ) -> UdfyldtJournalnotat:
     """Udfyld en journalnotatopgave, som allerede er åbnet."""
     if page.is_closed():
@@ -185,9 +192,13 @@ async def udfyld_aabnet_journalnotat(
         "primaerpart_navn",
     )
 
-    nummerplade = str(nummerplade or "").strip().upper()
-    if not re.fullmatch(r"[A-Z0-9]+", nummerplade) or nummerplade == "XXXX":
-        raise ValueError("nummerplade skal angives. Journalnotatet godkendes ikke.")
+    del nummerplade  # Beholdes midlertidigt for bagudkompatibilitet.
+    journalnotat_tekst = str(journalnotat_tekst or "").strip()
+    if not journalnotat_tekst:
+        raise ValueError(
+            "journalnotat_tekst skal angives. "
+            "Journalnotatet godkendes ikke."
+        )
 
     await _journalnotat_vent_paa_formular(
         page=page,
@@ -209,9 +220,9 @@ async def udfyld_aabnet_journalnotat(
         timeout=timeout,
     )
 
-    await _journalnotat_indsaet_nummerplade(
+    await _journalnotat_skriv_tekst(
         page=page,
-        nummerplade=nummerplade,
+        journalnotat_tekst=journalnotat_tekst,
         timeout=timeout,
     )
 
@@ -1411,75 +1422,229 @@ def _journalnotat_normaliser_tekst(
     ).strip()
 
 
-async def _journalnotat_indsaet_nummerplade(
+async def _journalnotat_find_editor(
     page: Page,
-    nummerplade: str,
     timeout: int,
-) -> None:
-    """Erstat kun xxxx og synkroniser TinyMCE med formularfeltet."""
-    nummerplade = str(nummerplade or "").strip().upper()
-    if not re.fullmatch(r"[A-Z0-9]+", nummerplade) or nummerplade == "XXXX":
-        raise ValueError("Nummerpladen mangler eller er ugyldig. Ingen godkendelse.")
-    editor_id = "tilfoejedeJournalnotater0.notat"
+) -> tuple[object, Locator]:
+    """Find præcis én synlig journalnotateditor i en iframe."""
+    selector = (
+        'body#tinymce[data-id="tilfoejedeJournalnotater0.notat"]'
+        '[contenteditable="true"]'
+    )
     elapsed_ms = 0
+
     while elapsed_ms < timeout:
         if page.is_closed():
-            raise RuntimeError("KY-siden blev lukket før tekstudfyldning.")
-        kandidater = []
+            raise RuntimeError(
+                "KY-siden blev lukket under journalnotatudfyldningen."
+            )
+
+        matches: list[tuple[object, Locator]] = []
         for frame in page.frames:
-            klar = await frame.evaluate(
-                """id => {
-                    const e = window.tinymce?.get(id);
-                    const b = e?.getBody();
-                    return Boolean(e?.initialized && b &&
-                        b.getAttribute('data-id') === id &&
-                        b.getClientRects().length && b.innerText.trim());
-                }""", editor_id,
+            editor = frame.locator(selector)
+            try:
+                if await editor.count() == 1 and await editor.is_visible():
+                    matches.append((frame, editor))
+            except Exception:
+                continue
+
+        if len(matches) == 1:
+            return matches[0]
+
+        if len(matches) > 1:
+            raise RuntimeError(
+                "Flere synlige journalnotateditorer blev fundet. "
+                "Ingen tekst skrives."
             )
-            if klar:
-                kandidater.append(frame)
-        if len(kandidater) > 1:
-            raise RuntimeError("Flere editorer matcher. Ingen tekst ændres.")
-        if kandidater:
-            await kandidater[0].evaluate(
-                r"""({id, plade}) => {
-                    const e = window.tinymce.get(id);
-                    const body = e.getBody();
-                    const original = body.innerText;
-                    if ((original.match(/\bxxxx\b/gi) || []).length !== 1) {
-                        throw new Error('Forventede præcis én xxxx-pladsholder.');
-                    }
-                    const kopi = body.cloneNode(true);
-                    const walker = body.ownerDocument.createTreeWalker(kopi, 4);
-                    const matches = [];
-                    while (walker.nextNode()) {
-                        if (/\bxxxx\b/i.test(walker.currentNode.nodeValue)) {
-                            matches.push(walker.currentNode);
-                        }
-                    }
-                    if (matches.length !== 1) {
-                        throw new Error('Pladsholderen er ikke entydig i tekstnoder.');
-                    }
-                    matches[0].nodeValue = matches[0].nodeValue.replace(
-                        /\bxxxx\b/i, () => plade
-                    );
-                    e.undoManager.transact(() => e.setContent(kopi.innerHTML));
-                    e.setDirty(true);
-                    e.fire('input');
-                    e.fire('change');
-                    // save synkroniserer textarea. Det godkender ikke KY-opgaven.
-                    e.save();
-                    const actual = e.getBody().innerText;
-                    const expected = original.replace(/\bxxxx\b/i, () => plade);
-                    if (actual !== expected || /\bxxxx\b/i.test(actual) ||
-                        e.getElement().value !== e.getContent()) {
-                        throw new Error('Tekst eller formularfelt kunne ikke verificeres.');
-                    }
-                }""",
-                {"id": editor_id, "plade": nummerplade},
-            )
-            print("Nummerpladen er indsat og formularfeltet verificeret.", flush=True)
-            return
+
         await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
-    raise PlaywrightTimeoutError("Journalnotatets TinyMCE-editor blev ikke klar.")
+
+    raise PlaywrightTimeoutError(
+        "Journalnotatets iframe-editor blev ikke fundet inden timeout."
+    )
+
+
+def _journalnotat_normaliser_sammenligning(value: object) -> str:
+    """Normalisér linjeskift og ydre whitespace til sikker kontrol."""
+    return (
+        str(value or "")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .strip()
+    )
+
+
+async def _journalnotat_skriv_tekst(
+    page: Page,
+    journalnotat_tekst: str,
+    timeout: int,
+) -> None:
+    """Erstat hele skabelonindholdet med den beregnede journalnotattekst."""
+    forventet = str(journalnotat_tekst or "").strip()
+    if not forventet:
+        raise ValueError("journalnotat_tekst må ikke være tom.")
+
+    frame, editor = await _journalnotat_find_editor(
+        page=page,
+        timeout=timeout,
+    )
+
+    # Skriv direkte i iframe-body'en. Der bruges ikke window.tinymce i
+    # iframe-vinduet, fordi KY ikke eksponerer TinyMCE-API'et dér.
+    await editor.fill(forventet)
+    await editor.dispatch_event("input")
+    await editor.dispatch_event("change")
+    await editor.dispatch_event("blur")
+
+    # Synkronisér med TinyMCE-instansen i parent-vinduet, hvis API'et findes.
+    # Ellers opdateres det underliggende formularfelt direkte.
+    await frame.evaluate(
+        """
+        ({ editorId, text }) => {
+            const body = document.body;
+            body.innerText = text;
+
+            for (const eventType of ['input', 'change', 'blur']) {
+                body.dispatchEvent(
+                    new Event(eventType, { bubbles: true })
+                );
+            }
+
+            const parentWindow = window.parent;
+            const tinyMce = parentWindow && parentWindow.tinymce;
+            const instance = (
+                tinyMce && typeof tinyMce.get === 'function'
+                    ? tinyMce.get(editorId)
+                    : null
+            );
+
+            if (instance) {
+                instance.setContent(body.innerHTML);
+                instance.setDirty(true);
+                instance.fire('input');
+                instance.fire('change');
+                if (typeof instance.save === 'function') {
+                    instance.save();
+                }
+                return;
+            }
+
+            const parentDocument = parentWindow.document;
+            const backingField = (
+                parentDocument.getElementById(editorId)
+                || parentDocument.querySelector(
+                    '[name="tilfoejedeJournalnotater[0].notat"]'
+                )
+            );
+
+            if (!backingField) {
+                throw new Error(
+                    'Journalnotatets underliggende formularfelt blev ikke fundet.'
+                );
+            }
+
+            backingField.value = body.innerHTML;
+            backingField.dispatchEvent(
+                new Event('input', { bubbles: true })
+            );
+            backingField.dispatchEvent(
+                new Event('change', { bubbles: true })
+            );
+        }
+        """,
+        {
+            "editorId": "tilfoejedeJournalnotater0.notat",
+            "text": forventet,
+        },
+    )
+
+    await _journalnotat_kontroller_tekst(
+        page=page,
+        journalnotat_tekst=forventet,
+        timeout=timeout,
+    )
+
+
+async def _journalnotat_kontroller_tekst(
+    page: Page,
+    journalnotat_tekst: str | None,
+    timeout: int,
+) -> None:
+    """Nægt Godkend, hvis editoren ikke indeholder den beregnede tekst."""
+    forventet = _journalnotat_normaliser_sammenligning(
+        journalnotat_tekst
+    )
+    if not forventet:
+        raise ValueError("journalnotat_tekst må ikke være tom.")
+
+    frame, editor = await _journalnotat_find_editor(
+        page=page,
+        timeout=timeout,
+    )
+    faktisk = _journalnotat_normaliser_sammenligning(
+        await editor.inner_text()
+    )
+
+    if faktisk != forventet:
+        raise RuntimeError(
+            "Journalnotatteksten matcher ikke beregningsresultatet. "
+            "KY-opgaven godkendes ikke."
+        )
+
+    if "xxxx" in faktisk.casefold():
+        raise RuntimeError(
+            "Journalnotatet indeholder stadig xxxx. "
+            "KY-opgaven godkendes ikke."
+        )
+
+    # Kontrollér også det formularfelt, som KY sender ved Godkend.
+    backing_value = await frame.evaluate(
+        """
+        editorId => {
+            const parentWindow = window.parent;
+            const tinyMce = parentWindow && parentWindow.tinymce;
+            const instance = (
+                tinyMce && typeof tinyMce.get === 'function'
+                    ? tinyMce.get(editorId)
+                    : null
+            );
+
+            if (instance && typeof instance.getContent === 'function') {
+                return instance.getContent({ format: 'text' });
+            }
+
+            const parentDocument = parentWindow.document;
+            const backingField = (
+                parentDocument.getElementById(editorId)
+                || parentDocument.querySelector(
+                    '[name="tilfoejedeJournalnotater[0].notat"]'
+                )
+            );
+
+            if (!backingField) {
+                return null;
+            }
+
+            const temporary = parentDocument.createElement('div');
+            temporary.innerHTML = backingField.value || '';
+            return temporary.innerText;
+        }
+        """,
+        "tilfoejedeJournalnotater0.notat",
+    )
+
+    if backing_value is None:
+        raise RuntimeError(
+            "Journalnotatets formularfelt kunne ikke verificeres. "
+            "KY-opgaven godkendes ikke."
+        )
+
+    backing_text = _journalnotat_normaliser_sammenligning(
+        backing_value
+    )
+    if backing_text != forventet:
+        raise RuntimeError(
+            "Journalnotatets formularfelt matcher ikke beregningsresultatet. "
+            "KY-opgaven godkendes ikke."
+        )
