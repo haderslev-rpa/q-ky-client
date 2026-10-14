@@ -718,62 +718,85 @@ async def _vent_paa_fysisk_post_javascript_tilstand(
     )
 
 
+# START: godkend_og_send_brev
 async def godkend_og_send_brev(
     page: Page,
     test: bool = True,
     timeout: int = OPGAVE_TIMEOUT_MS,
     wait_after_click_ms: int = SEND_STABILIZATION_WAIT_MS,
 ) -> bool:
-    """Godkend brevet og verificér, at KY er gået videre.
+    """Klik Godkend én gang og kontrollér, at opgavevisningen forlades."""
+    if page.is_closed():
+        raise RuntimeError("KY-siden er lukket før Godkend.")
 
-    Ved ``test=True`` klikkes der ikke på Godkend. I produktion klikkes
-    der på den eneste synlige og aktive Godkend-knap. Efter klikket får
-    KY en kort stabiliseringspause. Brevet betragtes kun som sendt, når
-    ingen synlig og aktiv Godkend-knap længere findes.
-    """
+    if not isinstance(test, bool):
+        raise TypeError("test skal være en bool.")
+
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, int)
+        or timeout <= 0
+    ):
+        raise ValueError("timeout skal være et positivt heltal.")
+
+    if (
+        isinstance(wait_after_click_ms, bool)
+        or not isinstance(wait_after_click_ms, int)
+        or wait_after_click_ms < 0
+    ):
+        raise ValueError(
+            "wait_after_click_ms skal være et ikke-negativt heltal."
+        )
+
     await _bekraeft_send_brev_opgave(page, timeout)
 
     if test:
-        print()
-        print("=" * 70)
-        print("TESTTILSTAND: BREVET BLIVER IKKE AFSENDT")
-        print("Godkend-knappen bliver ikke klikket.")
-        print("=" * 70)
+        logger.warning("Testtilstand: Godkend klikkes ikke.")
         return False
 
-    if wait_after_click_ms < 0:
-        raise ValueError("wait_after_click_ms må ikke være negativ.")
-
-    selector = (
-        "button[type='button'].btn.btn-primary.submit-opgave.margin-right"
-        "[data-href='/opgave/handling/fortsaet']"
+    header = page.locator(
+        KYSelectors.Borgere.SEND_BREV_HEADER
     )
-    button = await _find_eneste_aktive_godkend_knap(
-        page=page,
-        selector=selector,
+    await expect(header).to_have_count(1, timeout=timeout)
+    await expect(header).to_be_visible(timeout=timeout)
+
+    # Find knappen uden en lokal CSS-selector.
+    godkend = page.get_by_role(
+        "button",
+        name="Godkend",
+        exact=True,
+    )
+    await expect(godkend).to_have_count(1, timeout=timeout)
+    await expect(godkend).to_be_visible(timeout=timeout)
+    await expect(godkend).to_be_enabled(timeout=timeout)
+    await godkend.scroll_into_view_if_needed(timeout=timeout)
+
+    logger.warning(
+        "Klikker Godkend i Send brev. "
+        "Dette er en permanent handling."
+    )
+    await godkend.click(
+        timeout=min(ACTION_TIMEOUT_MS, timeout)
     )
 
-    print()
-    print("=" * 70)
-    print("PRODUKTIONSTILSTAND: KLIKKER PÅ GODKEND")
-    print("Brevet afsendes nu.")
-    print("=" * 70)
-
-    await button.click(timeout=ACTION_TIMEOUT_MS)
-
-    # Giv KY tid til at behandle handlingen og opdatere DOM'en.
+    # Klik aldrig igen automatisk, hvis kontrollen fejler.
     if wait_after_click_ms:
         await page.wait_for_timeout(wait_after_click_ms)
 
-    await _vent_paa_godkend_knap_ikke_synlig(
-        page=page,
-        selector=selector,
-        timeout=timeout,
+    if page.is_closed():
+        raise RuntimeError(
+            "KY-siden blev lukket; afslutningen kunne "
+            "ikke verificeres."
+        )
+
+    await expect(header).to_be_hidden(timeout=timeout)
+
+    logger.info(
+        "Godkend er klikket, og Send brev-headeren "
+        "er ikke længere synlig."
     )
-
-    print("Godkend-knappen er ikke længere synlig. Brevet er sendt.")
     return True
-
+# SLUT: godkend_og_send_brev
 
 async def _find_eneste_aktive_godkend_knap(
     page: Page,
@@ -1174,7 +1197,7 @@ async def udfyld_send_brev_ventetrin(
     status = status.strip()
 
     status_felt = page.locator(
-        "select[name='processConditions[0].statusStr']:visible"
+        f"{KYSelectors.Borgere.SEND_BREV_VENTETRIN_STATUS}:visible"
     )
 
     await expect(status_felt).to_have_count(
@@ -1212,6 +1235,39 @@ async def udfyld_send_brev_ventetrin(
         "Status før valg:",
         await status_felt.input_value(),
         flush=True,
+    )
+
+    input_type = (
+        await frist_felt.get_attribute("type") or "text"
+    ).casefold()
+
+    if input_type == "date":
+        frist_tekst = frist.isoformat()
+    elif input_type == "text":
+        frist_tekst = frist.strftime("%d-%m-%Y")
+    else:
+        raise RuntimeError(
+            f"Fristfeltets inputtype understøttes ikke: {input_type!r}."
+        )
+
+    await frist_felt.fill(
+        frist_tekst,
+        timeout=timeout,
+    )
+
+    await frist_felt.dispatch_event(
+        "input",
+        timeout=timeout,
+    )
+
+    await frist_felt.dispatch_event(
+        "change",
+        timeout=timeout,
+    )
+
+    await frist_felt.press(
+        "Tab",
+        timeout=timeout,
     )
 
     #
@@ -1271,39 +1327,6 @@ async def udfyld_send_brev_ventetrin(
         flush=True,
     )
 
-    input_type = (
-        await frist_felt.get_attribute("type") or "text"
-    ).casefold()
-
-    if input_type == "date":
-        frist_tekst = frist.isoformat()
-    elif input_type == "text":
-        frist_tekst = frist.strftime("%d-%m-%Y")
-    else:
-        raise RuntimeError(
-            f"Fristfeltets inputtype understøttes ikke: {input_type!r}."
-        )
-
-    await frist_felt.fill(
-        frist_tekst,
-        timeout=timeout,
-    )
-
-    await frist_felt.dispatch_event(
-        "input",
-        timeout=timeout,
-    )
-
-    await frist_felt.dispatch_event(
-        "change",
-        timeout=timeout,
-    )
-
-    await frist_felt.press(
-        "Tab",
-        timeout=timeout,
-    )
-
     print(
         "Endelig status:",
         await status_felt.input_value(),
@@ -1312,12 +1335,16 @@ async def udfyld_send_brev_ventetrin(
 
     print("=" * 80)
 
+    await expect(status_felt).to_have_value(
+        status,
+        timeout=timeout,
+    )
     await expect(frist_felt).to_have_value(
         frist_tekst,
         timeout=timeout,
     )
 
     return {
-        "status": await status_felt.input_value(),
+        "status": status,
         "frist": frist_tekst,
     }
