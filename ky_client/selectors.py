@@ -26,6 +26,18 @@ class KYSelectors:
         )
 
     class Borgere:
+        # Journalnotat: dokumentupload. Alle modal-locators scopes til formularen.
+        JOURNALNOTAT_UPLOAD_PANEL = '#opgaveForm div.modul.vedhaeftninger'
+        JOURNALNOTAT_UPLOAD_PANEL_TOGGLE = 'a[data-toggle="collapse"][href="#vedhaeftninger"]'
+        JOURNALNOTAT_UPLOAD_TABEL = 'table#vedhaeftede-dokumenter'
+        JOURNALNOTAT_UPLOAD_AABN = 'label[data-url*="/vedhaeftning/hentUploadFiltModal/"]'
+        JOURNALNOTAT_UPLOAD_FORM = 'form#uploadFilForm:visible'
+        JOURNALNOTAT_UPLOAD_FIL = 'input#uploadFilInput[type="file"]'
+        JOURNALNOTAT_UPLOAD_SAGSINPUT = 'input[id="command.selectedSagIds"]'
+        JOURNALNOTAT_UPLOAD_SAGSSOEG = 'input[type="search"][aria-controls="sagsvaelgertable"]'
+        JOURNALNOTAT_UPLOAD_GEM = 'button#uploadFilBtn'
+        JOURNALNOTAT_UPLOAD_FEJL = '#uploadFilError:visible, #uploadFilInputError:visible, #uploadFilSagError:visible'
+
         # Overblik
         PERSON_OPLYSNINGER = "table#person-oplysninger"
         SAGSOVERSIGT = "table#sagsoversigt"
@@ -537,3 +549,4 @@ class KYSelectors:
 
         # Luk alle opgaver
         LUK_ALLE_OPGAVER_FORM = "form#lukAlleOpgForm"
+

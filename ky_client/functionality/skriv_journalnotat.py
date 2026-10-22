@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
+import logging
+import hashlib
+from time import monotonic
+from urllib.parse import urljoin, urlparse, parse_qs
 import re
 from pathlib import Path
 from typing import TypedDict
 
 from dotenv import load_dotenv
-from playwright.async_api import Locator, Page
+from playwright.async_api import Locator, Page, expect
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from ky_client.functionality.borgere import (
@@ -17,6 +21,8 @@ from ky_client.functionality.borgere import (
 )
 from ky_client.selectors import KYSelectors
 
+
+logger = logging.getLogger(__name__)
 
 ACTION_TIMEOUT_MS = 30_000
 POLL_INTERVAL_MS = 250
@@ -45,6 +51,11 @@ class JournalnotatResultat(TypedDict):
     kilde: str
     test: bool
     afsluttet: bool
+    dokument_sti: str
+    dokument_uploadet: bool
+    dokument_id: str
+    dokument_url: str
+    dokument_sha256: str
 
 
 class UdfyldtJournalnotat(TypedDict):
@@ -68,64 +79,57 @@ async def opret_journalnotat(
     timeout: int = OPGAVE_TIMEOUT_MS,
     nummerplade: str | None = None,
     journalnotat_tekst: str | None = None,
+    dokument_sti: str | Path | None = None,
 ) -> JournalnotatResultat:
-    """Overtag og udfyld journalnotatopgaven fra opstart_opgave.
+    """Udfyld notatet og vedhaeft valgfrit en allerede hentet fil.
 
-    Funktionen åbner, genoptager eller opretter aldrig selv en opgave.
-    ``checkpoint`` skal være resultatet fra den fælles ``opstart_opgave``.
-    ``primaerpart_navn`` bruges til at vælge den entydige sagsrække.
-    Ved ``test=True`` klikkes der ikke på Godkend.
+    dokument_sti skal pege paa det faktiske afsendte brev, ikke en ny PDF.
+    Filen skal findes paa maskinen, hvor Python koerer (fx Ubuntu-serveren).
+    test=True udfoerer hverken upload-Gem eller afsluttende Godkend.
+    Funktionen sender eller downloader aldrig selv breve.
     """
     if page.is_closed():
-        raise RuntimeError(
-            "KY-siden er lukket før journalnotatet udfyldes."
-        )
-
+        raise RuntimeError("KY-siden er lukket.")
+    if not isinstance(test, bool):
+        raise TypeError("test skal vaere bool.")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise ValueError("timeout skal vaere et positivt heltal.")
     _journalnotat_valider_checkpoint(checkpoint)
-
+    fil = _journalnotat_laes_uploadfil(dokument_sti) if dokument_sti is not None else None
     udfyldt = await udfyld_aabnet_journalnotat(
-        page=page,
-        sag=sag,
-        primaerpart_navn=primaerpart_navn,
+        page=page, sag=sag, primaerpart_navn=primaerpart_navn,
         journalnotatskabelon=journalnotatskabelon,
-        aktive=aktive,
-        passive=passive,
-        timeout=timeout,
-        nummerplade=nummerplade,
+        aktive=aktive, passive=passive, timeout=timeout,
+        nummerplade=nummerplade, journalnotat_tekst=journalnotat_tekst,
     )
-
-    afsluttet = False
-    if test:
-        print(
-            "TESTTILSTAND: Journalnotatet afsluttes ikke.",
-            flush=True,
+    dokument = {"dokument_id": "", "dokument_url": "", "dokument_sha256": ""}
+    if fil is not None and not test:
+        dokument = await _journalnotat_upload_dokument(
+            page=page, checkpoint=checkpoint, fil=fil,
+            forventet_sag_id=udfyldt["sag_id"], timeout=timeout,
         )
+    if test:
+        logger.info("Testtilstand: ingen dokumentupload og ingen Godkend.")
     else:
         await _journalnotat_kontroller_tekst(
-            page=page,
-            journalnotat_tekst=journalnotat_tekst,
-            timeout=timeout,
+            page=page, journalnotat_tekst=journalnotat_tekst, timeout=timeout,
         )
-        await _journalnotat_afslut_opgave(
-            page=page,
-            timeout=timeout,
-        )
-        afsluttet = True
-
+        await _journalnotat_afslut_opgave(page=page, timeout=timeout)
     return {
         "opgave_id": checkpoint["opgave_id"],
         "opgave_navn": checkpoint["opgave_navn"],
         "opgave_url": checkpoint["opgave_url"],
         "borger_url": checkpoint["borger_url"],
         "menu_sti": checkpoint["menu_sti"],
-        "sag_id": udfyldt["sag_id"],
-        "sagstekst": udfyldt["sagstekst"],
+        "sag_id": udfyldt["sag_id"], "sagstekst": udfyldt["sagstekst"],
         "skabelon_titel": udfyldt["skabelon_titel"],
         "skabelon_noegle": udfyldt["skabelon_noegle"],
         "genoptaget": bool(checkpoint.get("genoptaget", False)),
         "kilde": str(checkpoint.get("kilde", "ny_opgave")),
-        "test": test,
-        "afsluttet": afsluttet,
+        "test": test, "afsluttet": not test,
+        "dokument_sti": str(fil["sti"]) if fil else "",
+        "dokument_uploadet": bool(dokument["dokument_id"]),
+        **dokument,
     }
 
 
@@ -598,7 +602,7 @@ async def _journalnotat_find_entydig_sag(
                     for value in primaerpart_text.split("/")
                     if _journalnotat_normaliser_navn(value)
                 ]
-                sag_match = wanted_sag in sagsid_text.casefold()
+                sag_match = wanted_sag == sagsid_text.casefold()
                 navn_match = wanted_name in primaerpart_names
                 diagnostic.append({
                     "raekke": index + 1,
@@ -1648,3 +1652,175 @@ async def _journalnotat_kontroller_tekst(
             "Journalnotatets formularfelt matcher ikke beregningsresultatet. "
             "KY-opgaven godkendes ikke."
         )
+
+
+
+class JournalnotatUploadfil(TypedDict):
+    sti: Path
+    navn: str
+    indhold: bytes
+    sha256: str
+
+
+def _journalnotat_laes_uploadfil(sti: str | Path) -> JournalnotatUploadfil:
+    """Laes filen en gang, saa upload og kontrol bruger samme bytes."""
+    if not isinstance(sti, (str, Path)) or not str(sti).strip():
+        raise ValueError("dokument_sti skal vaere en ikke-tom filsti.")
+    path = Path(sti).expanduser().resolve(strict=True)
+    if not path.is_file():
+        raise ValueError("dokument_sti er ikke en fil.")
+    content = path.read_bytes()
+    if not content:
+        raise ValueError("Dokumentet er tomt.")
+    if path.suffix.lower() == '.pdf' and not content.startswith(b'%PDF-'):
+        raise ValueError("Filen har PDF-endelse, men mangler PDF-header.")
+    return {"sti": path, "navn": path.name, "indhold": content,
+            "sha256": hashlib.sha256(content).hexdigest()}
+
+
+async def _journalnotat_upload_dokument(
+    page: Page,
+    checkpoint: OpstartOpgaveCheckpoint,
+    fil: JournalnotatUploadfil,
+    forventet_sag_id: str,
+    timeout: int,
+) -> dict[str, str]:
+    """Upload til den aktuelle opgave og verificer ny raekke og filindhold.
+
+    Ved fejl efter Gem maa processen ikke automatisk sende brevet igen.
+    En eksisterende raekke med samme filnavn stopper et nyt uploadforsog.
+    Den maa kontrolleres manuelt, da filnavnet ikke beviser sagstilknytning.
+    """
+    S = KYSelectors.Borgere
+    if not forventet_sag_id:
+        raise ValueError("Journalnotatets tekniske sag-id mangler.")
+    actual = await _journalnotat_hent_aktivt_opgave_id(page)
+    if actual.casefold() != str(checkpoint['opgave_id']).casefold():
+        raise RuntimeError("Aktiv opgave matcher ikke journalnotatets checkpoint.")
+    # Udvid kun Dokumenter-panelet paa den aktuelle opgave.
+    panel = page.locator(S.JOURNALNOTAT_UPLOAD_PANEL)
+    await expect(panel).to_have_count(1, timeout=timeout)
+    table = panel.locator(S.JOURNALNOTAT_UPLOAD_TABEL)
+    if not await table.is_visible():
+        toggle = panel.locator(S.JOURNALNOTAT_UPLOAD_PANEL_TOGGLE)
+        await expect(toggle).to_have_count(1, timeout=timeout)
+        await toggle.click(timeout=timeout)
+    await expect(table).to_be_visible(timeout=timeout)
+    rows = table.locator('tbody tr.table-row[data-id]')
+    before_ids = set(await rows.evaluate_all(
+        "rows => rows.map(row => row.getAttribute('data-id'))"
+    ))
+    # Brug textContent ogsaa for raekker paa andre klientside-tabelsider.
+    same_name = await rows.evaluate_all(
+        "(rows, name) => rows.some(r => Array.from(r.cells).some(c => c.textContent.trim() === name))",
+        fil['navn'],
+    )
+    if same_name:
+        raise RuntimeError(
+            "Et dokument med samme filnavn findes allerede paa opgaven. "
+            "Ingen ny upload foretages. Kontroller dokument og sag manuelt."
+        )
+    button = panel.locator(S.JOURNALNOTAT_UPLOAD_AABN)
+    await expect(button).to_have_count(1, timeout=timeout)
+    await button.click(timeout=timeout)
+    form = page.locator(S.JOURNALNOTAT_UPLOAD_FORM)
+    await expect(form).to_have_count(1, timeout=timeout)
+    await expect(form).to_be_visible(timeout=timeout)
+    task_id = await form.locator('input[name="opgaveId"]').input_value()
+    if task_id.casefold() != actual.casefold():
+        raise RuntimeError("Uploadvinduet tilhoerer en anden opgave.")
+    # Ingen Windows-dialog: bytes sendes direkte til input[type=file].
+    await form.locator(S.JOURNALNOTAT_UPLOAD_FIL).set_input_files(
+        {"name": fil['navn'], "mimeType": 'application/pdf'
+         if fil['sti'].suffix.lower() == '.pdf' else 'application/octet-stream',
+         "buffer": fil['indhold']}, timeout=timeout,
+    )
+    field = form.locator(S.JOURNALNOTAT_UPLOAD_SAGSINPUT)
+    await field.click(timeout=timeout)
+    menu = form.locator('.sagsvaelger-list.dropdown-menu')
+    await expect(menu).to_be_visible(timeout=timeout)
+    # Den allerede valgte journalnotatsag bestemmer status og teknisk id.
+    await menu.locator('input[data-tilstand="aktiv"]').set_checked(True, timeout=timeout)
+    await menu.locator('input[data-tilstand="passiv"]').set_checked(True, timeout=timeout)
+    table_sag = menu.locator('table#sagsvaelgertable')
+    target = table_sag.locator('tbody tr.table-row').filter(
+        has=page.locator('td.TEXT')
+    )
+    # Sammenlign attributter uden at interpolere input i CSS.
+    candidates = await target.evaluate_all(
+        "(rows, id) => rows.filter(r => r.getAttribute('data-id') === id).map(r => r.cells[0].textContent.trim())",
+        forventet_sag_id,
+    )
+    if len(candidates) != 1 or not candidates[0]:
+        raise RuntimeError("Journalnotatets sag findes ikke entydigt i uploadvinduet.")
+    search = menu.locator(S.JOURNALNOTAT_UPLOAD_SAGSSOEG)
+    await search.fill(candidates[0], timeout=timeout)
+    await search.dispatch_event('keyup', timeout=timeout)
+    row = table_sag.locator('tbody tr.table-row:visible').filter(
+        has=page.get_by_text(candidates[0], exact=True)
+    )
+    await expect(row).to_have_count(1, timeout=timeout)
+    if await row.get_attribute('data-id') != forventet_sag_id:
+        raise RuntimeError("Uploadvinduets viste SagsID har forkert teknisk id.")
+    chosen = form.locator('input[name="selectedSagIds"][data-chosen="true"]:enabled')
+    if await chosen.count() == 0:
+        await row.locator('td.select-row').click(timeout=timeout)
+    await expect(field).to_have_value('1 sag valgt', timeout=timeout)
+    await expect(chosen).to_have_count(1, timeout=timeout)
+    await expect(chosen).to_have_value(forventet_sag_id, timeout=timeout)
+    # Luk kun sagsdropdownen, ikke uploadvinduet.
+    if await menu.is_visible():
+        await menu.locator('button.close').click(timeout=timeout)
+        await expect(menu).to_be_hidden(timeout=timeout)
+    logger.info("Gemmer dokument paa journalnotatets verificerede sag.")
+    await form.locator(S.JOURNALNOTAT_UPLOAD_GEM).click(timeout=timeout)
+    # Gem klikkes aldrig igen automatisk ved timeout eller ukendt udfald.
+    deadline = monotonic() + timeout / 1000
+    while monotonic() < deadline:
+        if page.is_closed():
+            raise RuntimeError("Siden lukkede efter upload-Gem. Udfald er ukendt.")
+        errors = form.locator(S.JOURNALNOTAT_UPLOAD_FEJL)
+        if await errors.count():
+            raise RuntimeError("KY afviste upload: " + ' | '.join(await errors.all_inner_texts()))
+        if not await form.is_visible():
+            break
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+    else:
+        raise PlaywrightTimeoutError("Uploadvinduet lukkede ikke. Kontroller KY foer genkoersel.")
+    deadline = monotonic() + timeout / 1000
+    while monotonic() < deadline:
+        matches = await rows.evaluate_all(
+            """(rows, arg) => rows.filter(r =>
+                !arg.ids.includes(r.getAttribute('data-id')) &&
+                Array.from(r.cells).some(c => c.textContent.trim() === arg.name)
+            ).map(r => ({id: r.getAttribute('data-id'),
+                href: r.querySelector('a[href*="/utilities/hentDokument/"]')?.getAttribute('href') || ''}))""",
+            {"ids": list(before_ids), "name": fil['navn']},
+        )
+        if len(matches) > 1:
+            raise RuntimeError("Flere nye dokumentraekker matcher. Notatet godkendes ikke.")
+        if len(matches) == 1 and matches[0]['href']:
+            match = matches[0]
+            url = urljoin(page.url, match['href'])
+            parsed = urlparse(url)
+            expected_pid = parse_qs(urlparse(checkpoint['borger_url']).query).get('pId', [])
+            if (parsed.scheme, parsed.netloc) != (urlparse(page.url).scheme, urlparse(page.url).netloc):
+                raise RuntimeError("Dokumentlinket peger uden for den aktive KY-server.")
+            if parsed.path.rstrip('/').split('/')[-1] != match['id']:
+                raise RuntimeError("Dokumentlinkets id matcher ikke raekken.")
+            if expected_pid and parse_qs(parsed.query).get('pId') != expected_pid:
+                raise RuntimeError("Dokumentlinkets pId matcher ikke borgeren.")
+            response = await page.context.request.get(url, timeout=timeout, max_redirects=0)
+            try:
+                if response.status != 200:
+                    raise RuntimeError("Dokumentkontrollen fik HTTP-fejl eller redirect.")
+                digest = hashlib.sha256(await response.body()).hexdigest()
+            finally:
+                await response.dispose()
+            if digest != fil['sha256']:
+                raise RuntimeError("Uploadet fil matcher ikke kildefilen byte for byte.")
+            logger.info("Ny dokumentraekke og identisk filindhold er verificeret.")
+            return {"dokument_id": match['id'], "dokument_url": url,
+                    "dokument_sha256": digest}
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+    raise PlaywrightTimeoutError("Ingen ny dokumentraekke blev verificeret. Notatet godkendes ikke.")
