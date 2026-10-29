@@ -2611,80 +2611,171 @@ async def _modtag_post_hent_sags_id_fra_opgave(
     page: Page,
     timeout: int,
 ) -> str:
-    """Læs det viste SagsID fra den åbne Modtag post-opgave.
+    """Læs det viste SagsID fra en åben Modtag post-opgave.
 
-    KY viser værdien i feltet ``input#sags`` med firkantede parenteser,
-    eksempelvis ``[HTF-ZF6C9P]``. Funktionen returnerer værdien uden
-    parenteser, eksempelvis ``HTF-ZF6C9P``.
+    Nogle Modtag post-opgaver viser feltet:
+
+        input#sags[name='sags'][readonly]
+
+    med en værdi som:
+
+        [HTF-ZF6C9P]
+
+    Andre Modtag post-opgaver viser ikke feltet. Det gælder blandt
+    andet opgaver, hvor siden i stedet indeholder panelet
+    "Digital post oversigt".
+
+    Et manglende felt er derfor gyldigt og returneres som en tom
+    tekst. Den aktive HTF-sag findes senere i kontanthjælpsprocessen
+    via borgerens Sagsoversigt.
     """
+
+    if page.is_closed():
+        raise RuntimeError(
+            "KY-siden er lukket før aflæsning af opgavens SagsID."
+        )
+
+    if not isinstance(timeout, int):
+        raise TypeError(
+            "timeout skal være et heltal."
+        )
+
+    if timeout <= 0:
+        raise ValueError(
+            "timeout skal være større end 0."
+        )
+
     sagsfelter = page.locator(
-        "input#sags[name='sags'][readonly]"
+        KYSelectors.Borgere.MODTAG_POST_SAGSID
     )
 
-    await sagsfelter.first.wait_for(
-        state="attached",
-        timeout=timeout,
-    )
+    try:
+        antal_felter = await sagsfelter.count()
+
+    except PlaywrightError as error:
+        if page.is_closed():
+            raise RuntimeError(
+                "KY-siden blev lukket under aflæsning "
+                "af opgavens SagsID."
+            ) from error
+
+        raise
+
+    if antal_felter == 0:
+        logger.info(
+            "Modtag post-opgaven indeholder ikke et SagsID-felt. "
+            "sags_id_fra_opgave returneres som tom tekst."
+        )
+
+        return ""
 
     synlige_felter: list[Locator] = []
 
-    for index in range(await sagsfelter.count()):
+    for index in range(antal_felter):
         felt = sagsfelter.nth(index)
 
         try:
             if await felt.is_visible():
-                synlige_felter.append(felt)
-        except PlaywrightError:
-            continue
+                synlige_felter.append(
+                    felt
+                )
 
-    if len(synlige_felter) != 1:
-        raise RuntimeError(
-            "Modtag post-opgaven skal indeholde præcis ét synligt "
-            "SagsID-felt. "
-            f"Antal synlige felter={len(synlige_felter)}."
+        except PlaywrightError as error:
+            if page.is_closed():
+                raise RuntimeError(
+                    "KY-siden blev lukket under aflæsning "
+                    "af opgavens SagsID."
+                ) from error
+
+            logger.debug(
+                "Et SagsID-felt kunne ikke undersøges. "
+                "Indeks=%d, fejltype=%s, fejl=%s.",
+                index,
+                type(error).__name__,
+                error,
+            )
+
+    if not synlige_felter:
+        logger.info(
+            "Modtag post-opgaven indeholder SagsID-feltet, "
+            "men intet SagsID-felt er synligt. "
+            "sags_id_fra_opgave returneres som tom tekst."
         )
 
-    raavaerdi = _modtag_post_normaliser_tekst(
-        await synlige_felter[0].input_value()
-    )
+        return ""
 
-    if not raavaerdi:
+    if len(synlige_felter) > 1:
         raise RuntimeError(
-            "Modtag post-opgavens SagsID-felt er tomt."
+            "Modtag post-opgaven indeholder flere synlige "
+            "SagsID-felter. SagsID kan ikke aflæses entydigt."
         )
 
+    felt = synlige_felter[0]
+
+    try:
+        value = _modtag_post_normaliser_tekst(
+            await felt.input_value(
+                timeout=min(
+                    ACTION_TIMEOUT_MS,
+                    timeout,
+                )
+            )
+        )
+
+    except PlaywrightError as error:
+        if page.is_closed():
+            raise RuntimeError(
+                "KY-siden blev lukket under aflæsning "
+                "af opgavens SagsID."
+            ) from error
+
+        raise RuntimeError(
+            "Modtag post-opgavens synlige SagsID-felt "
+            "kunne ikke aflæses."
+        ) from error
+
+    if not value:
+        logger.info(
+            "Modtag post-opgavens SagsID-felt er tomt. "
+            "sags_id_fra_opgave returneres som tom tekst."
+        )
+
+        return ""
+
+    # Feltet vises normalt som:
+    #
+    #     [HTF-ZF6C9P]
+    #
+    # Fjern kun de omgivende firkantede parenteser.
     match = re.fullmatch(
         r"\[\s*([^\[\]]+?)\s*\]",
-        raavaerdi,
+        value,
     )
 
-    if match is None:
-        raise RuntimeError(
-            "Modtag post-opgavens SagsID har et uventet format. "
-            f"Værdi={raavaerdi!r}."
+    if match is not None:
+        sags_id = _modtag_post_normaliser_tekst(
+            match.group(1)
         )
 
-    sags_id = _modtag_post_normaliser_tekst(
-        match.group(1)
-    )
+    else:
+        # Accepter også en værdi uden firkantede parenteser.
+        sags_id = value
 
-    if not re.fullmatch(
-        r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+",
-        sags_id,
-    ):
-        raise RuntimeError(
-            "Modtag post-opgavens normaliserede SagsID er ugyldigt. "
-            f"Værdi={sags_id!r}."
+    if not sags_id:
+        logger.info(
+            "Modtag post-opgavens SagsID kunne ikke udledes. "
+            "sags_id_fra_opgave returneres som tom tekst."
         )
+
+        return ""
 
     logger.info(
-        "SagsID er aflæst fra den åbne Modtag post-opgave: %r.",
+        "Modtag post: SagsID fra opgaven er aflæst som %r.",
         sags_id,
     )
 
     return sags_id
 # SLUT: _modtag_post_hent_sags_id_fra_opgave
-
 
 async def modtag_post_dokument(
     page: Page,
