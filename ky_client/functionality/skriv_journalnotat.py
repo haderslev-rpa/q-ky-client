@@ -112,8 +112,18 @@ async def opret_journalnotat(
     if test:
         logger.info("Testtilstand: ingen dokumentupload og ingen Godkend.")
     else:
+        # Uploaden kan få KY/TinyMCE til at genindlæse skabelonens tekst.
+        # Skriv derfor den beregnede tekst igen efter vedhæftningen, så den
+        # konkrete nummerplade erstatter en eventuel xxxx-pladsholder.
+        await _journalnotat_skriv_tekst(
+            page=page,
+            journalnotat_tekst=str(journalnotat_tekst or "").strip(),
+            timeout=timeout,
+        )
         await _journalnotat_kontroller_tekst(
-            page=page, journalnotat_tekst=journalnotat_tekst, timeout=timeout,
+            page=page,
+            journalnotat_tekst=journalnotat_tekst,
+            timeout=timeout,
         )
         await _journalnotat_afslut_opgave(page=page, timeout=timeout)
     return {
@@ -1603,7 +1613,6 @@ async def _journalnotat_upload_dokument(
 
     # KY henter modalens HTML asynkront efter klikket. Vent derfor på
     # formularen i stedet for at undersøge DOM'en én enkelt gang med det samme.
-    # Brug selector uden :visible under søgningen; synlighed kontrolleres bagefter.
     formular_selector = "form#uploadFilForm"
     deadline = monotonic() + timeout / 1000
     formular_matches: list[tuple[object, Locator]] = []
@@ -1624,7 +1633,6 @@ async def _journalnotat_upload_dokument(
                 "Der blev fundet flere synlige uploadformularer på tværs af "
                 "hovedside og iframes. Uploaden afbrydes."
             )
-
         await page.wait_for_timeout(POLL_INTERVAL_MS)
     else:
         raise PlaywrightTimeoutError(
@@ -1709,13 +1717,10 @@ async def _journalnotat_upload_dokument(
         timeout=timeout,
     )
 
-    # KY har ét selectedSagIds-input pr. sag i listen. Derfor må vi ikke
-    # kræve, at der kun findes ét input i formularen. Vi kræver i stedet:
-    # 1) Det synlige felt viser "1 sag valgt" (kontrolleret ovenfor).
-    # 2) Præcis ét af inputtene har value lig det forventede tekniske sag-id.
+    # KY har ét selectedSagIds-input pr. sag i listen. Kræv derfor ikke,
+    # at formularen kun indeholder ét input. Kræv præcis ét value-match.
     selected_sag_ids = form.locator('input[name="selectedSagIds"]')
     await expect(selected_sag_ids).not_to_have_count(0, timeout=timeout)
-
     matchende_sag_ider = await selected_sag_ids.evaluate_all(
         """
         (inputs, expectedId) => inputs
@@ -1728,14 +1733,12 @@ async def _journalnotat_upload_dokument(
         """,
         forventet_sag_id,
     )
-
     if len(matchende_sag_ider) != 1:
         raise RuntimeError(
             "Uploadformularen indeholder ikke præcis ét selectedSagIds-input "
             f"med det forventede sag-id {forventet_sag_id!r}. "
             f"Antal fundet={len(matchende_sag_ider)}."
         )
-
     if matchende_sag_ider[0]["disabled"]:
         raise RuntimeError(
             "selectedSagIds-inputtet med det forventede sag-id er disabled."
@@ -1747,8 +1750,6 @@ async def _journalnotat_upload_dokument(
             await luk_knap.click(timeout=timeout)
             await expect(menu).to_be_hidden(timeout=timeout)
 
-    # OuterHTML i KY er:
-    # <button class="btn btn-primary" id="uploadFilBtn" type="button">Gem</button>
     gem = form.locator("button#uploadFilBtn")
     await expect(gem).to_have_count(1, timeout=timeout)
     await expect(gem).to_be_visible(timeout=timeout)
@@ -1760,19 +1761,14 @@ async def _journalnotat_upload_dokument(
         fil["navn"],
         forventet_sag_id,
     )
-
     try:
-        # Førstevalg: Playwrights normale klik på den konkrete Gem-knap.
         await gem.click(timeout=timeout)
     except PlaywrightError as klikfejl:
-        # Backup udføres kun, hvis det normale klik kaster en Playwright-fejl.
-        # Der klikkes én gang fysisk på knappens aktuelle midtpunkt.
         bounding_box = await gem.bounding_box()
         if bounding_box is None:
             raise RuntimeError(
                 "Gem-knappen er synlig, men dens placering kunne ikke bestemmes."
             ) from klikfejl
-
         klik_x = bounding_box["x"] + bounding_box["width"] / 2
         klik_y = bounding_box["y"] + bounding_box["height"] / 2
         logger.warning(
@@ -1882,4 +1878,3 @@ async def _journalnotat_upload_dokument(
         "Gem blev udført, men den nye dokumentrække kunne ikke verificeres. "
         "Journalnotatet godkendes ikke automatisk."
     )
-
