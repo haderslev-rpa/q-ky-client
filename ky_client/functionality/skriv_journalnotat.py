@@ -123,6 +123,7 @@ async def opret_journalnotat(
         await _journalnotat_kontroller_tekst(
             page=page,
             journalnotat_tekst=journalnotat_tekst,
+            nummerplade=nummerplade,
             timeout=timeout,
         )
         await _journalnotat_afslut_opgave(page=page, timeout=timeout)
@@ -1474,6 +1475,7 @@ async def _journalnotat_skriv_tekst(
 async def _journalnotat_kontroller_tekst(
     page: Page,
     journalnotat_tekst: str | None,
+    nummerplade: str | None,
     timeout: int,
 ) -> None:
     """Nægt Godkend, hvis editoren ikke indeholder den beregnede tekst."""
@@ -1501,6 +1503,23 @@ async def _journalnotat_kontroller_tekst(
         raise RuntimeError(
             "Journalnotatet indeholder stadig xxxx. "
             "KY-opgaven godkendes ikke."
+        )
+
+    forventet_nummerplade = re.sub(
+        r"[^A-Za-z0-9]",
+        "",
+        str(nummerplade or ""),
+    ).casefold()
+    if not forventet_nummerplade:
+        raise ValueError(
+            "nummerplade skal angives, før journalnotatet kan godkendes."
+        )
+
+    faktisk_uden_tegn = re.sub(r"[^A-Za-z0-9]", "", faktisk).casefold()
+    if forventet_nummerplade not in faktisk_uden_tegn:
+        raise RuntimeError(
+            "Journalnotatet indeholder ikke den forventede nummerplade "
+            f"{nummerplade!r}. KY-opgaven godkendes ikke."
         )
 
     # Kontrollér også det formularfelt, som KY sender ved Godkend.
@@ -1619,22 +1638,45 @@ async def _journalnotat_upload_dokument(
             "rows => rows.map(row => row.getAttribute('data-id'))"
         )
     )
-    samme_filnavn = await dokumentraekker.evaluate_all(
+    eksisterende_matches = await dokumentraekker.evaluate_all(
         """
-        (rows, filnavn) => rows.some(row =>
-            Array.from(row.cells).some(cell =>
-                (cell.textContent || '').trim() === filnavn
+        (rows, filnavn) => rows
+            .filter(row =>
+                Array.from(row.cells).some(cell =>
+                    (cell.textContent || '').trim() === filnavn
+                )
             )
-        )
+            .map(row => ({
+                id: String(row.getAttribute('data-id') || '').trim(),
+                href: row.querySelector(
+                    'a[href*="/utilities/hentDokument/"]'
+                )?.getAttribute('href') || ''
+            }))
         """,
         fil["navn"],
     )
-    if samme_filnavn:
+    if len(eksisterende_matches) > 1:
         raise RuntimeError(
-            "Et dokument med samme filnavn findes allerede på opgaven. "
-            "Gem klikkes ikke igen, fordi udfaldet af en tidligere upload "
-            "kan være permanent."
+            "Flere allerede vedhæftede dokumenter har samme filnavn. "
+            "Journalnotatet godkendes ikke automatisk."
         )
+    if len(eksisterende_matches) == 1:
+        eksisterende = eksisterende_matches[0]
+        dokument_url = (
+            urljoin(page.url, eksisterende["href"])
+            if eksisterende["href"]
+            else ""
+        )
+        logger.info(
+            "Dokumentet %s er allerede vedhæftet. Upload springes over; "
+            "journalnotatteksten kontrolleres før Godkend.",
+            fil["navn"],
+        )
+        return {
+            "dokument_id": str(eksisterende["id"] or "eksisterende"),
+            "dokument_url": dokument_url,
+            "dokument_sha256": "",
+        }
 
     aabn_upload = panel.locator(S.JOURNALNOTAT_UPLOAD_AABN)
     await expect(aabn_upload).to_have_count(1, timeout=timeout)
