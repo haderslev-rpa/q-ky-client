@@ -3234,19 +3234,51 @@ async def _modtag_post_vent_paa_dokumentpanel_aabent(
     )
 
 
+# START: _modtag_post_find_dokumentraekke
+
 async def _modtag_post_find_dokumentraekke(
     page: Page,
     dokument_panel: Locator,
     dokument: str,
     timeout: int,
 ) -> Locator | None:
-    """Find én dokumentrække via eksakt cellematch eller delvist match."""
-    wanted = _modtag_post_normaliser_tekst(dokument).casefold()
+    """Find præcis én dokumentrække med et stabilt dokumentmatch.
+
+    Dokumentnavnet må gerne indeholde ekstra tekst efter søgekriteriet.
+
+    Eksempel:
+        Søgekriterium:
+            Kontrolark p10
+
+        Dokumentnavn i KY:
+            Kontrolark p10 20260925
+
+        Resultat:
+            Rækken matcher.
+
+    Funktionen venter på stabilt tabelindhold, så et midlertidigt tomt eller
+    delvist indlæst DataTables-resultat ikke fejlagtigt bliver behandlet som
+    "dokument ikke fundet".
+    """
+    wanted = _modtag_post_normaliser_tekst(
+        dokument
+    ).casefold()
+
+    if not wanted:
+        raise ValueError(
+            "Dokumentkriteriet må ikke være tomt."
+        )
+
     p10_pattern = re.compile(
-        r"(?<![A-Za-z0-9])P10[\s_-]*\d+(?!\d)",
+        r"(?<![A-Za-z0-9])P10[\s_-]*\d*(?![A-Za-z0-9])",
         re.IGNORECASE,
     )
+
     elapsed_ms = 0
+    stable_checks = 0
+    required_stable_checks = 4
+    previous_signature: tuple[str, ...] | None = None
+    latest_row_texts: list[str] = []
 
     while elapsed_ms < timeout:
         if page.is_closed():
@@ -3257,67 +3289,190 @@ async def _modtag_post_find_dokumentraekke(
         rows = dokument_panel.locator(
             KYSelectors.Borgere.MODTAG_POST_DOKUMENTER_RAEKKER
         )
-        eksakte: list[tuple[Locator, str]] = []
-        delvise: list[tuple[Locator, str]] = []
-        laesbare_raekker = 0
 
-        for index in range(await rows.count()):
+        exact_matches: list[tuple[Locator, str]] = []
+        partial_matches: list[tuple[Locator, str]] = []
+        row_texts: list[str] = []
+
+        row_count = await rows.count()
+
+        for index in range(row_count):
             row = rows.nth(index)
+
             try:
                 if not await row.is_visible():
                     continue
+
                 row_text = _modtag_post_normaliser_tekst(
                     await row.inner_text()
                 )
+
                 if not row_text:
                     continue
-                laesbare_raekker += 1
 
-                if wanted == "p10":
-                    if p10_pattern.search(row_text):
-                        eksakte.append((row, row_text))
+                # DataTables kan vise en informationsrække, mens tabellen
+                # indlæses. Den må ikke tælle som et dokument.
+                normalized_row_text = row_text.casefold()
+
+                if (
+                    "ingen data tilgængelig" in normalized_row_text
+                    or "ingen matchende poster fundet" in normalized_row_text
+                    or "no matching records found" in normalized_row_text
+                ):
                     continue
+
+                row_texts.append(row_text)
 
                 cells = row.locator(
                     KYSelectors.Borgere.MODTAG_POST_DOKUMENTER_CELLER
                 )
+
                 cell_values: list[str] = []
-                for cell_index in range(await cells.count()):
-                    cell = cells.nth(cell_index)
-                    if await cell.is_visible():
-                        value = _modtag_post_normaliser_tekst(
-                            await cell.inner_text()
-                        )
-                        if value:
-                            cell_values.append(value)
 
-                if (
-                    any(value.casefold() == wanted for value in cell_values)
-                    or row_text.casefold() == wanted
+                for cell_index in range(
+                    await cells.count()
                 ):
-                    eksakte.append((row, row_text))
-                elif wanted in row_text.casefold():
-                    delvise.append((row, row_text))
-            except PlaywrightError:
-                continue
+                    cell = cells.nth(cell_index)
 
-        matches = eksakte if eksakte else delvise
+                    if not await cell.is_visible():
+                        continue
+
+                    cell_value = _modtag_post_normaliser_tekst(
+                        await cell.inner_text()
+                    )
+
+                    if cell_value:
+                        cell_values.append(cell_value)
+
+                normalized_cells = [
+                    value.casefold()
+                    for value in cell_values
+                ]
+
+                # Første prioritet er et eksakt cellematch.
+                if any(
+                    value == wanted
+                    for value in normalized_cells
+                ):
+                    exact_matches.append(
+                        (row, row_text)
+                    )
+                    continue
+
+                # Dokumentnavnet kan være efterfulgt af dato, løbenummer
+                # eller anden KY-genereret tekst.
+                if any(
+                    wanted in value
+                    for value in normalized_cells
+                ):
+                    partial_matches.append(
+                        (row, row_text)
+                    )
+                    continue
+
+                # Fallback til hele rækketeksten. Det håndterer blandt andet,
+                # at dokumentnavnet bliver delt over flere HTML-elementer.
+                if wanted in normalized_row_text:
+                    partial_matches.append(
+                        (row, row_text)
+                    )
+                    continue
+
+                # Bevar klientens særlige understøttelse af det generelle
+                # søgekriterium "p10".
+                if (
+                    wanted == "p10"
+                    and p10_pattern.search(row_text)
+                ):
+                    partial_matches.append(
+                        (row, row_text)
+                    )
+
+            except PlaywrightError as error:
+                logger.debug(
+                    "Dokumentrække %d kunne ikke læses endnu. "
+                    "Fejltype=%s, fejl=%s.",
+                    index + 1,
+                    type(error).__name__,
+                    error,
+                )
+
+        matches = (
+            exact_matches
+            if exact_matches
+            else partial_matches
+        )
+
         if len(matches) == 1:
-            return matches[0][0]
+            matched_row, matched_text = matches[0]
+
+            logger.info(
+                "Dokument fundet. Kriterium=%r, rækketekst=%r.",
+                dokument,
+                matched_text,
+            )
+
+            return matched_row
+
         if len(matches) > 1:
             raise RuntimeError(
                 "Flere dokumentrækker matcher kriteriet. "
                 f"Dokument={dokument!r}, "
                 f"matches={[text for _, text in matches]!r}."
             )
-        if laesbare_raekker > 0:
+
+        current_signature = tuple(
+            row_texts
+        )
+
+        if (
+            current_signature
+            and current_signature == previous_signature
+        ):
+            stable_checks += 1
+        else:
+            previous_signature = current_signature
+            stable_checks = 1 if current_signature else 0
+
+        latest_row_texts = row_texts
+
+        if elapsed_ms % 2_000 == 0:
+            logger.info(
+                "Søger efter dokument. "
+                "Kriterium=%r, antal DOM-rækker=%d, "
+                "læste dokumentrækker=%r, stabilitet=%d/%d.",
+                dokument,
+                row_count,
+                row_texts,
+                stable_checks,
+                required_stable_checks,
+            )
+
+        if stable_checks >= required_stable_checks:
+            logger.info(
+                "Dokumenttabellen er stabil, men intet dokument "
+                "matcher kriteriet. Kriterium=%r, dokumentrækker=%r.",
+                dokument,
+                latest_row_texts,
+            )
+
             return None
 
-        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        await page.wait_for_timeout(
+            POLL_INTERVAL_MS
+        )
         elapsed_ms += POLL_INTERVAL_MS
+
+    logger.info(
+        "Dokumentsøgningen udløb uden match. "
+        "Kriterium=%r, senest læste dokumentrækker=%r.",
+        dokument,
+        latest_row_texts,
+    )
 
     return None
 
+# SLUT: _modtag_post_find_dokumentraekke
 
 async def _modtag_post_find_dokumentlink(
     matchende_raekke: Locator,
