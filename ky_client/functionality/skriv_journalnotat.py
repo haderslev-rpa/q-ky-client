@@ -1356,89 +1356,118 @@ async def _journalnotat_skriv_tekst(
     journalnotat_tekst: str,
     timeout: int,
 ) -> None:
-    """Erstat hele skabelonindholdet med den beregnede journalnotattekst."""
+    """Skriv journalnotatteksten robust, selv om TinyMCE genindlæser sin iframe."""
     forventet = str(journalnotat_tekst or "").strip()
     if not forventet:
         raise ValueError("journalnotat_tekst må ikke være tom.")
 
-    frame, editor = await _journalnotat_find_editor(
-        page=page,
-        timeout=timeout,
-    )
+    editor_id = "tilfoejedeJournalnotater0.notat"
+    deadline = monotonic() + timeout / 1000
+    seneste_fejl: Exception | None = None
 
-    # Skriv direkte i iframe-body'en. Der bruges ikke window.tinymce i
-    # iframe-vinduet, fordi KY ikke eksponerer TinyMCE-API'et dér.
-    await editor.fill(forventet)
-    await editor.dispatch_event("input")
-    await editor.dispatch_event("change")
-    await editor.dispatch_event("blur")
+    while monotonic() < deadline:
+        if page.is_closed():
+            raise RuntimeError(
+                "KY-siden blev lukket under journalnotatudfyldningen."
+            )
 
-    # Synkronisér med TinyMCE-instansen i parent-vinduet, hvis API'et findes.
-    # Ellers opdateres det underliggende formularfelt direkte.
-    await frame.evaluate(
-        """
-        ({ editorId, text }) => {
-            const body = document.body;
-            body.innerText = text;
+        resterende_ms = max(
+            POLL_INTERVAL_MS,
+            int((deadline - monotonic()) * 1000),
+        )
 
-            for (const eventType of ['input', 'change', 'blur']) {
-                body.dispatchEvent(
-                    new Event(eventType, { bubbles: true })
-                );
-            }
+        try:
+            frame, editor = await _journalnotat_find_editor(
+                page=page,
+                timeout=resterende_ms,
+            )
 
-            const parentWindow = window.parent;
-            const tinyMce = parentWindow && parentWindow.tinymce;
-            const instance = (
-                tinyMce && typeof tinyMce.get === 'function'
-                    ? tinyMce.get(editorId)
-                    : null
-            );
+            # Udfør skrivning og events i én operation inde i den aktuelle
+            # iframe. Det undgår flere Playwright-kald til en Locator, som kan
+            # blive ugyldig, hvis TinyMCE udskifter iframe'en mellem kald.
+            await editor.evaluate(
+                """
+                (body, arg) => {
+                    body.innerText = arg.text;
 
-            if (instance) {
-                instance.setContent(body.innerHTML);
-                instance.setDirty(true);
-                instance.fire('input');
-                instance.fire('change');
-                if (typeof instance.save === 'function') {
-                    instance.save();
+                    for (const eventType of ['input', 'change', 'blur']) {
+                        body.dispatchEvent(
+                            new Event(eventType, { bubbles: true })
+                        );
+                    }
+
+                    const parentWindow = window.parent;
+                    const tinyMce = parentWindow && parentWindow.tinymce;
+                    const instance = (
+                        tinyMce && typeof tinyMce.get === 'function'
+                            ? tinyMce.get(arg.editorId)
+                            : null
+                    );
+
+                    if (instance) {
+                        instance.setContent(body.innerHTML);
+                        instance.setDirty(true);
+                        instance.fire('input');
+                        instance.fire('change');
+                        if (typeof instance.save === 'function') {
+                            instance.save();
+                        }
+                        return;
+                    }
+
+                    const parentDocument = parentWindow.document;
+                    const backingField = (
+                        parentDocument.getElementById(arg.editorId)
+                        || parentDocument.querySelector(
+                            '[name="tilfoejedeJournalnotater[0].notat"]'
+                        )
+                    );
+
+                    if (!backingField) {
+                        throw new Error(
+                            'Journalnotatets underliggende formularfelt blev ikke fundet.'
+                        );
+                    }
+
+                    backingField.value = body.innerHTML;
+                    backingField.dispatchEvent(
+                        new Event('input', { bubbles: true })
+                    );
+                    backingField.dispatchEvent(
+                        new Event('change', { bubbles: true })
+                    );
                 }
-                return;
-            }
+                """,
+                {
+                    "editorId": editor_id,
+                    "text": forventet,
+                },
+            )
+            break
+        except PlaywrightError as error:
+            seneste_fejl = error
+            fejltekst = str(error).casefold()
+            if "frame was detached" not in fejltekst:
+                raise
 
-            const parentDocument = parentWindow.document;
-            const backingField = (
-                parentDocument.getElementById(editorId)
-                || parentDocument.querySelector(
-                    '[name="tilfoejedeJournalnotater[0].notat"]'
-                )
-            );
-
-            if (!backingField) {
-                throw new Error(
-                    'Journalnotatets underliggende formularfelt blev ikke fundet.'
-                );
-            }
-
-            backingField.value = body.innerHTML;
-            backingField.dispatchEvent(
-                new Event('input', { bubbles: true })
-            );
-            backingField.dispatchEvent(
-                new Event('change', { bubbles: true })
-            );
-        }
-        """,
-        {
-            "editorId": "tilfoejedeJournalnotater0.notat",
-            "text": forventet,
-        },
-    )
+            logger.info(
+                "TinyMCE-iframe blev udskiftet under skrivning. "
+                "Finder den aktuelle editor igen."
+            )
+            await page.wait_for_timeout(POLL_INTERVAL_MS)
+    else:
+        raise PlaywrightTimeoutError(
+            "Journalnotatteksten kunne ikke skrives, fordi TinyMCE-iframe "
+            "gentagne gange blev udskiftet."
+        ) from seneste_fejl
 
     await _journalnotat_kontroller_tekst(
         page=page,
         journalnotat_tekst=forventet,
-        timeout=timeout,
+        timeout=max(
+            POLL_INTERVAL_MS,
+            int((deadline - monotonic()) * 1000),
+        ),
     )
 
 
