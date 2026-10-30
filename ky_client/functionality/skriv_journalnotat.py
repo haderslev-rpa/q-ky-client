@@ -1344,13 +1344,18 @@ async def _journalnotat_find_editor(
 
 
 def _journalnotat_normaliser_sammenligning(value: object) -> str:
-    """Normalisér linjeskift og ydre whitespace til sikker kontrol."""
-    return (
-        str(value or "")
-        .replace("\r\n", "\n")
-        .replace("\r", "\n")
-        .strip()
-    )
+    """Normalisér tekst til indholdskontrol uafhængigt af TinyMCE-formattering.
+
+    TinyMCE kan omsætte linjeskift til afsnit, tilføje non-breaking spaces og
+    returnere andre whitespace-tegn via ``inner_text()`` end dem, processen
+    sendte ind. Kontrollen sammenligner derfor tekstindholdet ord for ord,
+    men ignorerer forskelle i whitespace og Unicode-normalform.
+    """
+    import unicodedata
+
+    tekst = unicodedata.normalize("NFC", str(value or ""))
+    tekst = tekst.replace("\u00a0", " ").replace("\u202f", " ")
+    return re.sub(r"\s+", " ", tekst).strip()
 
 
 async def _journalnotat_skriv_tekst(
