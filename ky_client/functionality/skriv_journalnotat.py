@@ -1600,20 +1600,35 @@ async def _journalnotat_upload_dokument(
     await expect(aabn_upload).to_have_count(1, timeout=timeout)
     await aabn_upload.click(timeout=timeout)
 
-    # Uploadmodalen forventes i hovedsiden. Hvis KY flytter den til en iframe,
-    # findes den i den frame, hvor præcis én synlig formular eksisterer.
+    # KY henter modalens HTML asynkront efter klikket. Vent derfor på
+    # formularen i stedet for at undersøge DOM'en én enkelt gang med det samme.
+    # Brug selector uden :visible under søgningen; synlighed kontrolleres bagefter.
+    formular_selector = "form#uploadFilForm"
+    deadline = monotonic() + timeout / 1000
     formular_matches: list[tuple[object, Locator]] = []
-    for frame in page.frames:
-        formularer = frame.locator(S.JOURNALNOTAT_UPLOAD_FORM)
-        for index in range(await formularer.count()):
-            formular = formularer.nth(index)
-            if await formular.is_visible():
-                formular_matches.append((frame, formular))
 
-    if len(formular_matches) != 1:
-        raise RuntimeError(
-            "Forventede præcis én synlig uploadformular, men fandt "
-            f"{len(formular_matches)} på tværs af hovedside og iframes."
+    while monotonic() < deadline:
+        formular_matches = []
+        for frame in page.frames:
+            formularer = frame.locator(formular_selector)
+            for index in range(await formularer.count()):
+                formular = formularer.nth(index)
+                if await formular.is_visible():
+                    formular_matches.append((frame, formular))
+
+        if len(formular_matches) == 1:
+            break
+        if len(formular_matches) > 1:
+            raise RuntimeError(
+                "Der blev fundet flere synlige uploadformularer på tværs af "
+                "hovedside og iframes. Uploaden afbrydes."
+            )
+
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+    else:
+        raise PlaywrightTimeoutError(
+            "Uploadvinduet blev åbnet, men form#uploadFilForm blev ikke "
+            "synlig inden timeout."
         )
 
     upload_frame, form = formular_matches[0]
