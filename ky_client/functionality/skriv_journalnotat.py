@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from dotenv import load_dotenv
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page, expect
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -1708,12 +1709,37 @@ async def _journalnotat_upload_dokument(
         timeout=timeout,
     )
 
+    # KY har ét selectedSagIds-input pr. sag i listen. Derfor må vi ikke
+    # kræve, at der kun findes ét input i formularen. Vi kræver i stedet:
+    # 1) Det synlige felt viser "1 sag valgt" (kontrolleret ovenfor).
+    # 2) Præcis ét af inputtene har value lig det forventede tekniske sag-id.
     selected_sag_ids = form.locator('input[name="selectedSagIds"]')
-    await expect(selected_sag_ids).to_have_count(1, timeout=timeout)
-    await expect(selected_sag_ids).to_have_value(
+    await expect(selected_sag_ids).not_to_have_count(0, timeout=timeout)
+
+    matchende_sag_ider = await selected_sag_ids.evaluate_all(
+        """
+        (inputs, expectedId) => inputs
+            .map((input, index) => ({
+                index,
+                value: String(input.value || '').trim(),
+                disabled: input.disabled
+            }))
+            .filter(item => item.value === expectedId)
+        """,
         forventet_sag_id,
-        timeout=timeout,
     )
+
+    if len(matchende_sag_ider) != 1:
+        raise RuntimeError(
+            "Uploadformularen indeholder ikke præcis ét selectedSagIds-input "
+            f"med det forventede sag-id {forventet_sag_id!r}. "
+            f"Antal fundet={len(matchende_sag_ider)}."
+        )
+
+    if matchende_sag_ider[0]["disabled"]:
+        raise RuntimeError(
+            "selectedSagIds-inputtet med det forventede sag-id er disabled."
+        )
 
     if await menu.is_visible():
         luk_knap = menu.locator("button.close")
@@ -1721,17 +1747,42 @@ async def _journalnotat_upload_dokument(
             await luk_knap.click(timeout=timeout)
             await expect(menu).to_be_hidden(timeout=timeout)
 
-    gem = form.locator(S.JOURNALNOTAT_UPLOAD_GEM)
+    # OuterHTML i KY er:
+    # <button class="btn btn-primary" id="uploadFilBtn" type="button">Gem</button>
+    gem = form.locator("button#uploadFilBtn")
     await expect(gem).to_have_count(1, timeout=timeout)
     await expect(gem).to_be_visible(timeout=timeout)
     await expect(gem).to_be_enabled(timeout=timeout)
+    await gem.scroll_into_view_if_needed(timeout=timeout)
 
     logger.info(
         "Vedhæfter %s til journalnotatets sag %s og klikker Gem én gang.",
         fil["navn"],
         forventet_sag_id,
     )
-    await gem.click(timeout=timeout)
+
+    try:
+        # Førstevalg: Playwrights normale klik på den konkrete Gem-knap.
+        await gem.click(timeout=timeout)
+    except PlaywrightError as klikfejl:
+        # Backup udføres kun, hvis det normale klik kaster en Playwright-fejl.
+        # Der klikkes én gang fysisk på knappens aktuelle midtpunkt.
+        bounding_box = await gem.bounding_box()
+        if bounding_box is None:
+            raise RuntimeError(
+                "Gem-knappen er synlig, men dens placering kunne ikke bestemmes."
+            ) from klikfejl
+
+        klik_x = bounding_box["x"] + bounding_box["width"] / 2
+        klik_y = bounding_box["y"] + bounding_box["height"] / 2
+        logger.warning(
+            "Normalt klik på Gem fejlede (%s). Forsøger ét fysisk "
+            "museklik på knappens midtpunkt x=%.1f, y=%.1f.",
+            klikfejl,
+            klik_x,
+            klik_y,
+        )
+        await page.mouse.click(klik_x, klik_y)
 
     deadline = monotonic() + timeout / 1000
     while monotonic() < deadline:
