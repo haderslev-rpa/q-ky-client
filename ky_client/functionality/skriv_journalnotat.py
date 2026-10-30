@@ -118,6 +118,7 @@ async def opret_journalnotat(
         await _journalnotat_skriv_tekst(
             page=page,
             journalnotat_tekst=str(journalnotat_tekst or "").strip(),
+            nummerplade=nummerplade,
             timeout=timeout,
         )
         await _journalnotat_kontroller_tekst(
@@ -207,7 +208,6 @@ async def udfyld_aabnet_journalnotat(
         feltnavn="journalnotatskabelon",
     )
     del primaerpart_navn  # Beholdes midlertidigt for bagudkompatibilitet.
-    del nummerplade  # Beholdes midlertidigt for bagudkompatibilitet.
     journalnotat_tekst = str(journalnotat_tekst or "").strip()
     if not journalnotat_tekst:
         raise ValueError(
@@ -234,6 +234,7 @@ async def udfyld_aabnet_journalnotat(
     await _journalnotat_skriv_tekst(
         page=page,
         journalnotat_tekst=journalnotat_tekst,
+        nummerplade=nummerplade,
         timeout=timeout,
     )
     return {
@@ -1355,6 +1356,7 @@ def _journalnotat_normaliser_sammenligning(value: object) -> str:
 async def _journalnotat_skriv_tekst(
     page: Page,
     journalnotat_tekst: str,
+    nummerplade: str | None,
     timeout: int,
 ) -> None:
     """Skriv journalnotatteksten robust, selv om TinyMCE genindlæser sin iframe."""
@@ -1465,6 +1467,7 @@ async def _journalnotat_skriv_tekst(
     await _journalnotat_kontroller_tekst(
         page=page,
         journalnotat_tekst=forventet,
+        nummerplade=nummerplade,
         timeout=max(
             POLL_INTERVAL_MS,
             int((deadline - monotonic()) * 1000),
