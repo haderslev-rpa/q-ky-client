@@ -1539,152 +1539,6 @@ def _journalnotat_laes_uploadfil(sti: str | Path) -> JournalnotatUploadfil:
             "sha256": hashlib.sha256(content).hexdigest()}
 
 
-async def _journalnotat_klik_upload_gem(
-    page: Page,
-    form: Locator,
-    timeout: int,
-) -> None:
-    """Aktiver Gem i dokument-uploadvinduet med sikre fallback-metoder.
-
-    Prioritet:
-    1. Semantisk Playwright-locator på den synlige Gem-knap i formularen.
-    2. Det stabile KY-id ``button#uploadFilBtn``.
-    3. Normal Playwright-click.
-    4. DOM-click via JavaScript på det samme verificerede element.
-    5. Fysisk museklik i centrum af knappen.
-
-    Funktionen forsøger aldrig flere metoder, hvis uploadformularen allerede
-    er lukket. Dermed undgås et nyt klik efter et muligt succesfuldt Gem.
-    """
-    if page.is_closed():
-        raise RuntimeError("KY-siden er lukket før upload-Gem.")
-
-    await expect(form).to_have_count(1, timeout=timeout)
-    await expect(form).to_be_visible(timeout=timeout)
-
-    kandidater = (
-        form.get_by_role("button", name=re.compile(r"^\s*Gem\s*$", re.IGNORECASE)),
-        form.locator("button#uploadFilBtn"),
-        form.locator(KYSelectors.Borgere.JOURNALNOTAT_UPLOAD_GEM),
-        form.locator(
-            "button[type='submit']:has-text('Gem'), "
-            "input[type='submit'][value='Gem']"
-        ),
-    )
-
-    gem_knap: Locator | None = None
-    kandidat_beskrivelse = ""
-
-    for kandidatnummer, kandidat in enumerate(kandidater, start=1):
-        try:
-            antal = await kandidat.count()
-            if antal != 1:
-                continue
-            mulig_knap = kandidat.first
-            if not await mulig_knap.is_visible():
-                continue
-            if not await mulig_knap.is_enabled():
-                continue
-            gem_knap = mulig_knap
-            kandidat_beskrivelse = f"kandidat {kandidatnummer}"
-            break
-        except PlaywrightError:
-            continue
-
-    if gem_knap is None:
-        raise RuntimeError(
-            "Gem-knappen i dokument-uploadvinduet blev ikke fundet "
-            "entydigt som en synlig og aktiv knap."
-        )
-
-    await gem_knap.scroll_into_view_if_needed(timeout=timeout)
-    await expect(gem_knap).to_be_visible(timeout=timeout)
-    await expect(gem_knap).to_be_enabled(timeout=timeout)
-
-    # Kontroller at knappen stadig tilhører den samme synlige uploadformular.
-    tilhoerer_formular = await gem_knap.evaluate(
-        """(button, formElement) =>
-            button.isConnected &&
-            formElement.isConnected &&
-            formElement.contains(button) &&
-            button.getClientRects().length === 1
-        """,
-        await form.element_handle(),
-    )
-    if not tilhoerer_formular:
-        raise RuntimeError(
-            "Gem-knappen tilhører ikke længere det synlige uploadvindue."
-        )
-
-    logger.info(
-        "Upload-Gem er fundet via %s. Forsøger normalt Playwright-click.",
-        kandidat_beskrivelse,
-    )
-
-    try:
-        await gem_knap.click(timeout=min(timeout, ACTION_TIMEOUT_MS))
-        return
-    except PlaywrightError as normal_click_error:
-        # Et click kan være gennemført, selv om Playwright efterfølgende får
-        # en fejl. Klik derfor ikke igen, hvis formularen allerede er lukket.
-        if page.is_closed():
-            raise RuntimeError(
-                "KY-siden lukkede under upload-Gem. Udfaldet er ukendt."
-            ) from normal_click_error
-        if not await form.is_visible():
-            logger.info(
-                "Uploadformularen lukkede efter normalt click; Gem regnes "
-                "som aktiveret."
-            )
-            return
-        logger.warning(
-            "Normalt Playwright-click på upload-Gem fejlede. "
-            "Forsøger DOM-click på samme verificerede knap. Fejl=%s",
-            normal_click_error,
-        )
-
-    try:
-        await gem_knap.evaluate(
-            """button => {
-                button.focus({preventScroll: true});
-                button.click();
-            }"""
-        )
-        await page.wait_for_timeout(POLL_INTERVAL_MS)
-        if not await form.is_visible():
-            return
-    except PlaywrightError as dom_click_error:
-        if page.is_closed():
-            raise RuntimeError(
-                "KY-siden lukkede under DOM-click på upload-Gem. "
-                "Udfaldet er ukendt."
-            ) from dom_click_error
-        if not await form.is_visible():
-            return
-        logger.warning(
-            "DOM-click på upload-Gem fejlede. "
-            "Forsøger fysisk museklik. Fejl=%s",
-            dom_click_error,
-        )
-
-    # Sidste fallback: fysisk museklik midt på den fortsat synlige knap.
-    if not await form.is_visible():
-        return
-    box = await gem_knap.bounding_box()
-    if box is None or box["width"] <= 0 or box["height"] <= 0:
-        raise RuntimeError(
-            "Upload-Gem har ingen klikbar skærmposition til musefallback."
-        )
-    click_x = box["x"] + box["width"] / 2
-    click_y = box["y"] + box["height"] / 2
-    logger.warning(
-        "Bruger fysisk museklik på upload-Gem ved x=%.1f, y=%.1f.",
-        click_x,
-        click_y,
-    )
-    await page.mouse.click(click_x, click_y)
-
-
 async def _journalnotat_upload_dokument(
     page: Page,
     checkpoint: OpstartOpgaveCheckpoint,
@@ -1769,22 +1623,80 @@ async def _journalnotat_upload_dokument(
     await expect(row).to_have_count(1, timeout=timeout)
     if await row.get_attribute('data-id') != forventet_sag_id:
         raise RuntimeError("Uploadvinduets viste SagsID har forkert teknisk id.")
-    chosen = form.locator('input[name="selectedSagIds"][data-chosen="true"]:enabled')
-    if await chosen.count() == 0:
-        await row.locator('td.select-row').click(timeout=timeout)
+    # KY markerer ikke nødvendigvis det valgte input med
+    # data-chosen="true". Kontrollér derfor den synlige feltværdi og
+    # formularens faktiske selectedSagIds-værdi.
+    valgte_sagsinput = form.locator('input[name="selectedSagIds"]')
+    sag_er_valgt = (
+        _journalnotat_normaliser_tekst(
+            await field.input_value()
+        ).casefold()
+        == "1 sag valgt"
+    )
+    if not sag_er_valgt:
+        vaelg_celle = row.locator('td.select-row')
+        await expect(vaelg_celle).to_have_count(1, timeout=timeout)
+        await vaelg_celle.scroll_into_view_if_needed()
+        await vaelg_celle.click(timeout=timeout)
     await expect(field).to_have_value('1 sag valgt', timeout=timeout)
-    await expect(chosen).to_have_count(1, timeout=timeout)
-    await expect(chosen).to_have_value(forventet_sag_id, timeout=timeout)
+    await page.wait_for_function(
+        """
+        ({ formSelector, expectedId }) => {
+            const form = document.querySelector(formSelector);
+            if (!form) {
+                return false;
+            }
+            const inputs = Array.from(
+                form.querySelectorAll('input[name="selectedSagIds"]')
+            );
+            return inputs.filter(
+                input => String(input.value || '').trim() === expectedId
+            ).length === 1;
+        }
+        """,
+        {
+            "formSelector": "form#uploadFilForm",
+            "expectedId": forventet_sag_id,
+        },
+        timeout=timeout,
+    )
+    valgte_sagsider = await valgte_sagsinput.evaluate_all(
+        """
+        inputs => inputs
+            .map(input => String(input.value || '').trim())
+            .filter(value => value)
+        """
+    )
+    matchende_sagsider = [
+        sag_id
+        for sag_id in valgte_sagsider
+        if sag_id == forventet_sag_id
+    ]
+    if len(matchende_sagsider) != 1:
+        raise RuntimeError(
+            "Uploadvinduet registrerede ikke journalnotatets sag entydigt. "
+            f"Forventet teknisk sag-id={forventet_sag_id!r}, "
+            f"registrerede sag-id'er={valgte_sagsider!r}, "
+            f"feltværdi={await field.input_value()!r}."
+        )
+    faktisk_sag_id = await row.get_attribute('data-id')
+    if faktisk_sag_id != forventet_sag_id:
+        raise RuntimeError(
+            "Den valgte række ændrede teknisk sag-id under sagsvalget. "
+            f"Forventet={forventet_sag_id!r}, "
+            f"faktisk={faktisk_sag_id!r}."
+        )
+    logger.info(
+        "Uploadvinduet har registreret præcis én sag. "
+        "Teknisk sag-id=%s.",
+        forventet_sag_id,
+    )
     # Luk kun sagsdropdownen, ikke uploadvinduet.
     if await menu.is_visible():
         await menu.locator('button.close').click(timeout=timeout)
         await expect(menu).to_be_hidden(timeout=timeout)
     logger.info("Gemmer dokument paa journalnotatets verificerede sag.")
-    await _journalnotat_klik_upload_gem(
-        page=page,
-        form=form,
-        timeout=timeout,
-    )
+    await form.locator(S.JOURNALNOTAT_UPLOAD_GEM).click(timeout=timeout)
     # Gem klikkes aldrig igen automatisk ved timeout eller ukendt udfald.
     deadline = monotonic() + timeout / 1000
     while monotonic() < deadline:
