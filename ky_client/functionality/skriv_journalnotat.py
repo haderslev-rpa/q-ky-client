@@ -175,12 +175,15 @@ async def udfyld_aabnet_journalnotat(
     nummerplade: str | None = None,
     journalnotat_tekst: str | None = None,
 ) -> UdfyldtJournalnotat:
-    """Udfyld en journalnotatopgave, som allerede er åbnet."""
+    """Udfyld en journalnotatopgave, som allerede er åbnet.
+
+    Sagen findes alene ud fra den angivne sagsnøgle/SagsID.
+    Navnet på primærparten anvendes ikke til sagsvalget.
+    """
     if page.is_closed():
         raise RuntimeError(
             "KY-siden er lukket før journalnotatet udfyldes."
         )
-
     sag = _journalnotat_input_eller_env(
         value=sag,
         env_name=ENV_JOURNALNOTAT_SAG,
@@ -191,11 +194,7 @@ async def udfyld_aabnet_journalnotat(
         env_name=ENV_JOURNALNOTAT_SKABELON,
         feltnavn="journalnotatskabelon",
     )
-    primaerpart_navn = _journalnotat_paakraevet_tekst(
-        str(primaerpart_navn or ""),
-        "primaerpart_navn",
-    )
-
+    del primaerpart_navn  # Beholdes midlertidigt for bagudkompatibilitet.
     del nummerplade  # Beholdes midlertidigt for bagudkompatibilitet.
     journalnotat_tekst = str(journalnotat_tekst or "").strip()
     if not journalnotat_tekst:
@@ -203,17 +202,14 @@ async def udfyld_aabnet_journalnotat(
             "journalnotat_tekst skal angives. "
             "Journalnotatet godkendes ikke."
         )
-
     await _journalnotat_vent_paa_formular(
         page=page,
         timeout=timeout,
     )
     await _journalnotat_nulstil_skabelon(page=page)
-
     valgt_sag = await _journalnotat_vaelg_sag(
         page=page,
         sag=sag,
-        primaerpart_navn=primaerpart_navn,
         aktive=aktive,
         passive=passive,
         timeout=timeout,
@@ -223,21 +219,17 @@ async def udfyld_aabnet_journalnotat(
         skabelon_titel=journalnotatskabelon,
         timeout=timeout,
     )
-
     await _journalnotat_skriv_tekst(
         page=page,
         journalnotat_tekst=journalnotat_tekst,
         timeout=timeout,
     )
-
     return {
         "sag_id": valgt_sag["sag_id"],
         "sagstekst": valgt_sag["sagstekst"],
         "skabelon_titel": valgt_skabelon["titel"],
         "skabelon_noegle": valgt_skabelon["noegle"],
     }
-
-
 async def _journalnotat_vent_paa_formular(
     page: Page,
     timeout: int,
@@ -256,28 +248,24 @@ async def _journalnotat_vent_paa_formular(
 async def _journalnotat_vaelg_sag(
     page: Page,
     sag: str,
-    primaerpart_navn: str,
     aktive: bool,
     passive: bool,
     timeout: int,
 ) -> dict[str, str]:
-    """Vælg én sag, hvor søgetekst og primærpart matcher."""
+    """Vælg præcis én sag ud fra sagsnøglen/SagsID alene."""
     dropdown_selector = (
         KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_DROPDOWN
     )
     dropdown = page.locator(dropdown_selector).first
-
     await dropdown.wait_for(
         state="visible",
         timeout=timeout,
     )
     await dropdown.scroll_into_view_if_needed()
-
     if not await dropdown.is_enabled():
         raise RuntimeError(
             "Journalnotatets sagsdropdown er synlig, men ikke aktiv."
         )
-
     await _journalnotat_aabn_sagsvaelger(
         page=page,
         dropdown=dropdown,
@@ -289,41 +277,32 @@ async def _journalnotat_vaelg_sag(
     )
     await _journalnotat_saet_checkbox(
         page=page,
-        selector=(
-            KYSelectors.Borgere.JOURNALNOTAT_AKTIV_CHECKBOX
-        ),
+        selector=KYSelectors.Borgere.JOURNALNOTAT_AKTIV_CHECKBOX,
         checked=aktive,
         feltnavn="Aktive sager",
         timeout=timeout,
     )
     await _journalnotat_saet_checkbox(
         page=page,
-        selector=(
-            KYSelectors.Borgere.JOURNALNOTAT_PASSIV_CHECKBOX
-        ),
+        selector=KYSelectors.Borgere.JOURNALNOTAT_PASSIV_CHECKBOX,
         checked=passive,
         feltnavn="Passive sager",
         timeout=timeout,
     )
-
     search = page.locator(
         f"{KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_SOEG}:visible"
     ).last
-    await search.wait_for(
-        state="visible",
-        timeout=timeout,
-    )
+    await search.wait_for(state="visible", timeout=timeout)
     await search.fill(sag)
     await search.dispatch_event("input")
     await search.dispatch_event("keyup")
-
     row = await _journalnotat_find_entydig_sag(
         page=page,
         sag=sag,
-        primaerpart_navn=primaerpart_navn,
+        aktive=aktive,
+        passive=passive,
         timeout=timeout,
     )
-
     sag_id = (
         await row.get_attribute("data-id")
         or await row.get_attribute("data-sag-id")
@@ -334,16 +313,11 @@ async def _journalnotat_vaelg_sag(
         raise RuntimeError(
             "Den valgte sagsrække mangler et teknisk sag-id."
         )
-
     sagstekst = _journalnotat_normaliser_tekst(
         await row.inner_text()
     )
-
     await row.scroll_into_view_if_needed()
-    await row.click(
-        timeout=min(ACTION_TIMEOUT_MS, timeout)
-    )
-
+    await row.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
     await _journalnotat_vent_paa_en_sag_valgt(
         page=page,
         dropdown_selector=dropdown_selector,
@@ -354,13 +328,10 @@ async def _journalnotat_vaelg_sag(
         dropdown_selector=dropdown_selector,
         timeout=timeout,
     )
-
     return {
         "sag_id": sag_id,
         "sagstekst": sagstekst,
     }
-
-
 async def _journalnotat_aabn_sagsvaelger(
     page: Page,
     dropdown: Locator,
@@ -447,226 +418,116 @@ async def _journalnotat_saet_checkbox(
 async def _journalnotat_find_entydig_sag(
     page: Page,
     sag: str,
-    primaerpart_navn: str,
+    aktive: bool,
+    passive: bool,
     timeout: int,
 ) -> Locator:
-    """Find præcis én aktiv sag med korrekt SagsID og primærpart.
+    """Find præcis én sag med den angivne sagsnøgle/SagsID.
 
-    Kun rækker med data-tilstand="aktiv" kan vælges.
-
-    ``sag`` matches mod kolonnen SagsID.
-    ``primaerpart_navn`` matches mod navnene i kolonnen
-    Udb. modtager / Primærpart.
-
-    Funktionen returnerer rækkens Locator, når præcis én aktiv række
-    matcher. Funktionen stopper sikkert, hvis ingen eller flere rækker
-    matcher.
+    Der matches kun på kolonnen SagsID. Navnet på primærparten indgår ikke.
+    Kun sager med en tilladt status kan vælges.
     """
-    wanted_sag = _journalnotat_normaliser_tekst(
-        sag
-    ).casefold()
-
-    wanted_name = _journalnotat_normaliser_navn(
-        primaerpart_navn
-    )
-
+    wanted_sag = _journalnotat_normaliser_tekst(sag).casefold()
     if not wanted_sag:
+        raise ValueError("sag må ikke være tom.")
+    if not aktive and not passive:
         raise ValueError(
-            "sag må ikke være tom."
+            "Mindst én af aktive eller passive sager skal medtages."
         )
-
-    if not wanted_name:
-        raise ValueError(
-            "primaerpart_navn må ikke være tomt."
-        )
-
     tables = page.locator("#sagsvaelgertable:visible")
     await tables.first.wait_for(state="visible", timeout=timeout)
     if await tables.count() != 1:
         raise RuntimeError(
-            "Journalnotatet har ikke praecis en synlig sagstabel. "
-            "Ingen sag vaelges."
+            "Journalnotatet har ikke præcis én synlig sagstabel. "
+            "Ingen sag vælges."
         )
     table = tables.first
-
-    await table.wait_for(
-        state="visible",
-        timeout=timeout,
-    )
-
-    header_cells = table.locator(
-        "thead th"
-    )
-
+    await table.wait_for(state="visible", timeout=timeout)
+    header_cells = table.locator("thead th")
     headers = [
         _journalnotat_normaliser_overskrift(
             await header_cells.nth(index).inner_text()
         )
-        for index in range(
-            await header_cells.count()
-        )
+        for index in range(await header_cells.count())
     ]
-
     sagsid_indexes = [
         index
         for index, header in enumerate(headers)
         if header == "sagsid"
     ]
-
-    primaerpart_indexes = [
-        index
-        for index, header in enumerate(headers)
-        if (
-            "udb. modtager" in header
-            and "primaerpart" in header
-        )
-    ]
-
     if len(sagsid_indexes) != 1:
         raise RuntimeError(
             "Journalnotatets sagstabel mangler en entydig "
             "kolonne med overskriften 'SagsID'. "
             f"Fundne kolonner={headers!r}."
         )
-
-    if len(primaerpart_indexes) != 1:
-        raise RuntimeError(
-            "Journalnotatets sagstabel mangler en entydig kolonne "
-            "'Udb. modtager / Primærpart'. "
-            f"Fundne kolonner={headers!r}."
-        )
-
     sagsid_index = sagsid_indexes[0]
-    primaerpart_index = primaerpart_indexes[0]
-
+    tilladte_tilstande: set[str] = set()
+    if aktive:
+        tilladte_tilstande.add("aktiv")
+    if passive:
+        tilladte_tilstande.add("passiv")
     elapsed_ms = 0
     diagnostic: list[dict[str, object]] = []
-
     while elapsed_ms < timeout:
-        # VIGTIGT:
-        # Passive rækker ignoreres altid, også hvis checkboxen
-        # "Passive" ved en fejl er markeret.
-        rows = table.locator(
-            "tbody tr.table-row"
-            '[data-tilstand="aktiv"]:visible'
-        )
-
+        rows = table.locator("tbody tr.table-row:visible")
         matches: list[Locator] = []
         diagnostic = []
-
-        for index in range(
-            await rows.count()
-        ):
+        for index in range(await rows.count()):
             row = rows.nth(index)
-
             try:
                 if not await row.is_visible():
                     continue
-
+                tilstand = (
+                    await row.get_attribute("data-tilstand")
+                    or ""
+                ).strip().casefold()
                 cells = row.locator("td")
-
-                required_cell_count = max(
-                    sagsid_index,
-                    primaerpart_index,
-                ) + 1
-
-                if (
-                    await cells.count()
-                    < required_cell_count
-                ):
+                if await cells.count() <= sagsid_index:
                     raise RuntimeError(
-                        "En aktiv sagsrække mangler enten "
-                        "SagsID-cellen eller cellen for "
-                        "'Udb. modtager / Primærpart'."
+                        "En synlig sagsrække mangler SagsID-cellen."
                     )
-
-                sagsid_text = (
-                    _journalnotat_normaliser_tekst(
-                        await cells.nth(
-                            sagsid_index
-                        ).inner_text()
-                    )
+                sagsid_text = _journalnotat_normaliser_tekst(
+                    await cells.nth(sagsid_index).inner_text()
                 )
-
-                primaerpart_text = (
-                    _journalnotat_normaliser_tekst(
-                        await cells.nth(
-                            primaerpart_index
-                        ).inner_text()
-                    )
-                )
-
-                # Bevar eksakt navnematch mod hver side af skrastregen.
-                primaerpart_names = [
-                    _journalnotat_normaliser_navn(value)
-                    for value in primaerpart_text.split("/")
-                    if _journalnotat_normaliser_navn(value)
-                ]
                 sag_match = wanted_sag == sagsid_text.casefold()
-                navn_match = wanted_name in primaerpart_names
-                diagnostic.append({
-                    "raekke": index + 1,
-                    "sagsid_match": sag_match,
-                    "navn_match": navn_match,
-                    "forventet_navne_laengde": len(wanted_name),
-                    "kandidat_navne_laengder": [
-                        len(value) for value in primaerpart_names
-                    ],
-                    "forventet_har_parentes": (
-                        "(" in wanted_name or ")" in wanted_name
-                    ),
-                })
-                if not sag_match or not navn_match:
+                tilstand_tilladt = tilstand in tilladte_tilstande
+                diagnostic.append(
+                    {
+                        "raekke": index + 1,
+                        "sagsid": sagsid_text,
+                        "sagsid_match": sag_match,
+                        "tilstand": tilstand,
+                        "tilstand_tilladt": tilstand_tilladt,
+                    }
+                )
+                if not sag_match or not tilstand_tilladt:
                     continue
                 matches.append(row)
-
             except RuntimeError:
                 raise
             except Exception as error:
-                # En laesefejl er ikke det samme som et manglende match.
                 raise RuntimeError(
-                    "En aktiv sagsraekke kunne ikke laeses sikkert. "
-                    f"Raekke={index + 1}, fejltype={type(error).__name__}. "
-                    "Ingen sag vaelges."
+                    "En sagsrække kunne ikke læses sikkert. "
+                    f"Række={index + 1}, "
+                    f"fejltype={type(error).__name__}. "
+                    "Ingen sag vælges."
                 ) from error
         if len(matches) == 1:
-            selected_row = matches[0]
-
-            selected_state = (
-                await selected_row.get_attribute(
-                    "data-tilstand"
-                )
-                or ""
-            ).strip().casefold()
-
-            if selected_state != "aktiv":
-                raise RuntimeError(
-                    "Den fundne sagsrække er ikke aktiv. "
-                    "Ingen sag vælges."
-                )
-
-            return selected_row
-
+            return matches[0]
         if len(matches) > 1:
             raise RuntimeError(
-                "Flere aktive sager matcher både "
-                f"SagsID-søgningen {sag!r} og Navn fra "
-                "Personoplysninger. Ingen sag vælges. "
-                f"Diagnose for aktive raekker={diagnostic!r}."
+                "Flere sager matcher den samme sagsnøgle/SagsID "
+                f"{sag!r}. Ingen sag vælges. "
+                f"Diagnose={diagnostic!r}."
             )
-
-        await page.wait_for_timeout(
-            POLL_INTERVAL_MS
-        )
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
-
     raise PlaywrightTimeoutError(
-        "Ingen aktiv sag matchede både "
-        f"SagsID-søgningen {sag!r} og Navn fra "
-        "Personoplysninger. "
-        f"Diagnose for aktive raekker={diagnostic!r}."
+        "Ingen sag matchede sagsnøglen/SagsID "
+        f"{sag!r}. "
+        f"Diagnose={diagnostic!r}."
     )
-
 def _journalnotat_normaliser_overskrift(
     value: object,
 ) -> str:
