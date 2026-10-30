@@ -35,7 +35,7 @@ class KYSelectors:
         JOURNALNOTAT_UPLOAD_FIL = 'input#uploadFilInput[type="file"]'
         JOURNALNOTAT_UPLOAD_SAGSINPUT = 'input[id="command.selectedSagIds"]'
         JOURNALNOTAT_UPLOAD_SAGSSOEG = 'input[type="search"][aria-controls="sagsvaelgertable"]'
-        JOURNALNOTAT_UPLOAD_GEM = 'button#uploadFilBtn'
+        JOURNALNOTAT_UPLOAD_GEM = "button#uploadFilBtn.btn.btn-primary[type='button']"
         JOURNALNOTAT_UPLOAD_FEJL = '#uploadFilError:visible, #uploadFilInputError:visible, #uploadFilSagError:visible'
 
         # Overblik

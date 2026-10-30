@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from dotenv import load_dotenv
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page, expect
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -111,8 +112,20 @@ async def opret_journalnotat(
     if test:
         logger.info("Testtilstand: ingen dokumentupload og ingen Godkend.")
     else:
+        # Uploaden kan få KY/TinyMCE til at genindlæse skabelonens tekst.
+        # Skriv derfor den beregnede tekst igen efter vedhæftningen, så den
+        # konkrete nummerplade erstatter en eventuel xxxx-pladsholder.
+        await _journalnotat_skriv_tekst(
+            page=page,
+            journalnotat_tekst=str(journalnotat_tekst or "").strip(),
+            nummerplade=nummerplade,
+            timeout=timeout,
+        )
         await _journalnotat_kontroller_tekst(
-            page=page, journalnotat_tekst=journalnotat_tekst, timeout=timeout,
+            page=page,
+            journalnotat_tekst=journalnotat_tekst,
+            nummerplade=nummerplade,
+            timeout=timeout,
         )
         await _journalnotat_afslut_opgave(page=page, timeout=timeout)
     return {
@@ -175,12 +188,15 @@ async def udfyld_aabnet_journalnotat(
     nummerplade: str | None = None,
     journalnotat_tekst: str | None = None,
 ) -> UdfyldtJournalnotat:
-    """Udfyld en journalnotatopgave, som allerede er åbnet."""
+    """Udfyld en journalnotatopgave, som allerede er åbnet.
+
+    Sagen findes alene ud fra den angivne sagsnøgle/SagsID.
+    Navnet på primærparten anvendes ikke til sagsvalget.
+    """
     if page.is_closed():
         raise RuntimeError(
             "KY-siden er lukket før journalnotatet udfyldes."
         )
-
     sag = _journalnotat_input_eller_env(
         value=sag,
         env_name=ENV_JOURNALNOTAT_SAG,
@@ -191,29 +207,21 @@ async def udfyld_aabnet_journalnotat(
         env_name=ENV_JOURNALNOTAT_SKABELON,
         feltnavn="journalnotatskabelon",
     )
-    primaerpart_navn = _journalnotat_paakraevet_tekst(
-        str(primaerpart_navn or ""),
-        "primaerpart_navn",
-    )
-
-    del nummerplade  # Beholdes midlertidigt for bagudkompatibilitet.
+    del primaerpart_navn  # Beholdes midlertidigt for bagudkompatibilitet.
     journalnotat_tekst = str(journalnotat_tekst or "").strip()
     if not journalnotat_tekst:
         raise ValueError(
             "journalnotat_tekst skal angives. "
             "Journalnotatet godkendes ikke."
         )
-
     await _journalnotat_vent_paa_formular(
         page=page,
         timeout=timeout,
     )
     await _journalnotat_nulstil_skabelon(page=page)
-
     valgt_sag = await _journalnotat_vaelg_sag(
         page=page,
         sag=sag,
-        primaerpart_navn=primaerpart_navn,
         aktive=aktive,
         passive=passive,
         timeout=timeout,
@@ -223,21 +231,18 @@ async def udfyld_aabnet_journalnotat(
         skabelon_titel=journalnotatskabelon,
         timeout=timeout,
     )
-
     await _journalnotat_skriv_tekst(
         page=page,
         journalnotat_tekst=journalnotat_tekst,
+        nummerplade=nummerplade,
         timeout=timeout,
     )
-
     return {
         "sag_id": valgt_sag["sag_id"],
         "sagstekst": valgt_sag["sagstekst"],
         "skabelon_titel": valgt_skabelon["titel"],
         "skabelon_noegle": valgt_skabelon["noegle"],
     }
-
-
 async def _journalnotat_vent_paa_formular(
     page: Page,
     timeout: int,
@@ -256,28 +261,24 @@ async def _journalnotat_vent_paa_formular(
 async def _journalnotat_vaelg_sag(
     page: Page,
     sag: str,
-    primaerpart_navn: str,
     aktive: bool,
     passive: bool,
     timeout: int,
 ) -> dict[str, str]:
-    """Vælg én sag, hvor søgetekst og primærpart matcher."""
+    """Vælg præcis én sag ud fra sagsnøglen/SagsID alene."""
     dropdown_selector = (
         KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_DROPDOWN
     )
     dropdown = page.locator(dropdown_selector).first
-
     await dropdown.wait_for(
         state="visible",
         timeout=timeout,
     )
     await dropdown.scroll_into_view_if_needed()
-
     if not await dropdown.is_enabled():
         raise RuntimeError(
             "Journalnotatets sagsdropdown er synlig, men ikke aktiv."
         )
-
     await _journalnotat_aabn_sagsvaelger(
         page=page,
         dropdown=dropdown,
@@ -289,41 +290,32 @@ async def _journalnotat_vaelg_sag(
     )
     await _journalnotat_saet_checkbox(
         page=page,
-        selector=(
-            KYSelectors.Borgere.JOURNALNOTAT_AKTIV_CHECKBOX
-        ),
+        selector=KYSelectors.Borgere.JOURNALNOTAT_AKTIV_CHECKBOX,
         checked=aktive,
         feltnavn="Aktive sager",
         timeout=timeout,
     )
     await _journalnotat_saet_checkbox(
         page=page,
-        selector=(
-            KYSelectors.Borgere.JOURNALNOTAT_PASSIV_CHECKBOX
-        ),
+        selector=KYSelectors.Borgere.JOURNALNOTAT_PASSIV_CHECKBOX,
         checked=passive,
         feltnavn="Passive sager",
         timeout=timeout,
     )
-
     search = page.locator(
         f"{KYSelectors.Borgere.JOURNALNOTAT_SAGSVAELGER_SOEG}:visible"
     ).last
-    await search.wait_for(
-        state="visible",
-        timeout=timeout,
-    )
+    await search.wait_for(state="visible", timeout=timeout)
     await search.fill(sag)
     await search.dispatch_event("input")
     await search.dispatch_event("keyup")
-
     row = await _journalnotat_find_entydig_sag(
         page=page,
         sag=sag,
-        primaerpart_navn=primaerpart_navn,
+        aktive=aktive,
+        passive=passive,
         timeout=timeout,
     )
-
     sag_id = (
         await row.get_attribute("data-id")
         or await row.get_attribute("data-sag-id")
@@ -334,16 +326,11 @@ async def _journalnotat_vaelg_sag(
         raise RuntimeError(
             "Den valgte sagsrække mangler et teknisk sag-id."
         )
-
     sagstekst = _journalnotat_normaliser_tekst(
         await row.inner_text()
     )
-
     await row.scroll_into_view_if_needed()
-    await row.click(
-        timeout=min(ACTION_TIMEOUT_MS, timeout)
-    )
-
+    await row.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
     await _journalnotat_vent_paa_en_sag_valgt(
         page=page,
         dropdown_selector=dropdown_selector,
@@ -354,13 +341,10 @@ async def _journalnotat_vaelg_sag(
         dropdown_selector=dropdown_selector,
         timeout=timeout,
     )
-
     return {
         "sag_id": sag_id,
         "sagstekst": sagstekst,
     }
-
-
 async def _journalnotat_aabn_sagsvaelger(
     page: Page,
     dropdown: Locator,
@@ -447,226 +431,116 @@ async def _journalnotat_saet_checkbox(
 async def _journalnotat_find_entydig_sag(
     page: Page,
     sag: str,
-    primaerpart_navn: str,
+    aktive: bool,
+    passive: bool,
     timeout: int,
 ) -> Locator:
-    """Find præcis én aktiv sag med korrekt SagsID og primærpart.
+    """Find præcis én sag med den angivne sagsnøgle/SagsID.
 
-    Kun rækker med data-tilstand="aktiv" kan vælges.
-
-    ``sag`` matches mod kolonnen SagsID.
-    ``primaerpart_navn`` matches mod navnene i kolonnen
-    Udb. modtager / Primærpart.
-
-    Funktionen returnerer rækkens Locator, når præcis én aktiv række
-    matcher. Funktionen stopper sikkert, hvis ingen eller flere rækker
-    matcher.
+    Der matches kun på kolonnen SagsID. Navnet på primærparten indgår ikke.
+    Kun sager med en tilladt status kan vælges.
     """
-    wanted_sag = _journalnotat_normaliser_tekst(
-        sag
-    ).casefold()
-
-    wanted_name = _journalnotat_normaliser_navn(
-        primaerpart_navn
-    )
-
+    wanted_sag = _journalnotat_normaliser_tekst(sag).casefold()
     if not wanted_sag:
+        raise ValueError("sag må ikke være tom.")
+    if not aktive and not passive:
         raise ValueError(
-            "sag må ikke være tom."
+            "Mindst én af aktive eller passive sager skal medtages."
         )
-
-    if not wanted_name:
-        raise ValueError(
-            "primaerpart_navn må ikke være tomt."
-        )
-
     tables = page.locator("#sagsvaelgertable:visible")
     await tables.first.wait_for(state="visible", timeout=timeout)
     if await tables.count() != 1:
         raise RuntimeError(
-            "Journalnotatet har ikke praecis en synlig sagstabel. "
-            "Ingen sag vaelges."
+            "Journalnotatet har ikke præcis én synlig sagstabel. "
+            "Ingen sag vælges."
         )
     table = tables.first
-
-    await table.wait_for(
-        state="visible",
-        timeout=timeout,
-    )
-
-    header_cells = table.locator(
-        "thead th"
-    )
-
+    await table.wait_for(state="visible", timeout=timeout)
+    header_cells = table.locator("thead th")
     headers = [
         _journalnotat_normaliser_overskrift(
             await header_cells.nth(index).inner_text()
         )
-        for index in range(
-            await header_cells.count()
-        )
+        for index in range(await header_cells.count())
     ]
-
     sagsid_indexes = [
         index
         for index, header in enumerate(headers)
         if header == "sagsid"
     ]
-
-    primaerpart_indexes = [
-        index
-        for index, header in enumerate(headers)
-        if (
-            "udb. modtager" in header
-            and "primaerpart" in header
-        )
-    ]
-
     if len(sagsid_indexes) != 1:
         raise RuntimeError(
             "Journalnotatets sagstabel mangler en entydig "
             "kolonne med overskriften 'SagsID'. "
             f"Fundne kolonner={headers!r}."
         )
-
-    if len(primaerpart_indexes) != 1:
-        raise RuntimeError(
-            "Journalnotatets sagstabel mangler en entydig kolonne "
-            "'Udb. modtager / Primærpart'. "
-            f"Fundne kolonner={headers!r}."
-        )
-
     sagsid_index = sagsid_indexes[0]
-    primaerpart_index = primaerpart_indexes[0]
-
+    tilladte_tilstande: set[str] = set()
+    if aktive:
+        tilladte_tilstande.add("aktiv")
+    if passive:
+        tilladte_tilstande.add("passiv")
     elapsed_ms = 0
     diagnostic: list[dict[str, object]] = []
-
     while elapsed_ms < timeout:
-        # VIGTIGT:
-        # Passive rækker ignoreres altid, også hvis checkboxen
-        # "Passive" ved en fejl er markeret.
-        rows = table.locator(
-            "tbody tr.table-row"
-            '[data-tilstand="aktiv"]:visible'
-        )
-
+        rows = table.locator("tbody tr.table-row:visible")
         matches: list[Locator] = []
         diagnostic = []
-
-        for index in range(
-            await rows.count()
-        ):
+        for index in range(await rows.count()):
             row = rows.nth(index)
-
             try:
                 if not await row.is_visible():
                     continue
-
+                tilstand = (
+                    await row.get_attribute("data-tilstand")
+                    or ""
+                ).strip().casefold()
                 cells = row.locator("td")
-
-                required_cell_count = max(
-                    sagsid_index,
-                    primaerpart_index,
-                ) + 1
-
-                if (
-                    await cells.count()
-                    < required_cell_count
-                ):
+                if await cells.count() <= sagsid_index:
                     raise RuntimeError(
-                        "En aktiv sagsrække mangler enten "
-                        "SagsID-cellen eller cellen for "
-                        "'Udb. modtager / Primærpart'."
+                        "En synlig sagsrække mangler SagsID-cellen."
                     )
-
-                sagsid_text = (
-                    _journalnotat_normaliser_tekst(
-                        await cells.nth(
-                            sagsid_index
-                        ).inner_text()
-                    )
+                sagsid_text = _journalnotat_normaliser_tekst(
+                    await cells.nth(sagsid_index).inner_text()
                 )
-
-                primaerpart_text = (
-                    _journalnotat_normaliser_tekst(
-                        await cells.nth(
-                            primaerpart_index
-                        ).inner_text()
-                    )
-                )
-
-                # Bevar eksakt navnematch mod hver side af skrastregen.
-                primaerpart_names = [
-                    _journalnotat_normaliser_navn(value)
-                    for value in primaerpart_text.split("/")
-                    if _journalnotat_normaliser_navn(value)
-                ]
                 sag_match = wanted_sag == sagsid_text.casefold()
-                navn_match = wanted_name in primaerpart_names
-                diagnostic.append({
-                    "raekke": index + 1,
-                    "sagsid_match": sag_match,
-                    "navn_match": navn_match,
-                    "forventet_navne_laengde": len(wanted_name),
-                    "kandidat_navne_laengder": [
-                        len(value) for value in primaerpart_names
-                    ],
-                    "forventet_har_parentes": (
-                        "(" in wanted_name or ")" in wanted_name
-                    ),
-                })
-                if not sag_match or not navn_match:
+                tilstand_tilladt = tilstand in tilladte_tilstande
+                diagnostic.append(
+                    {
+                        "raekke": index + 1,
+                        "sagsid": sagsid_text,
+                        "sagsid_match": sag_match,
+                        "tilstand": tilstand,
+                        "tilstand_tilladt": tilstand_tilladt,
+                    }
+                )
+                if not sag_match or not tilstand_tilladt:
                     continue
                 matches.append(row)
-
             except RuntimeError:
                 raise
             except Exception as error:
-                # En laesefejl er ikke det samme som et manglende match.
                 raise RuntimeError(
-                    "En aktiv sagsraekke kunne ikke laeses sikkert. "
-                    f"Raekke={index + 1}, fejltype={type(error).__name__}. "
-                    "Ingen sag vaelges."
+                    "En sagsrække kunne ikke læses sikkert. "
+                    f"Række={index + 1}, "
+                    f"fejltype={type(error).__name__}. "
+                    "Ingen sag vælges."
                 ) from error
         if len(matches) == 1:
-            selected_row = matches[0]
-
-            selected_state = (
-                await selected_row.get_attribute(
-                    "data-tilstand"
-                )
-                or ""
-            ).strip().casefold()
-
-            if selected_state != "aktiv":
-                raise RuntimeError(
-                    "Den fundne sagsrække er ikke aktiv. "
-                    "Ingen sag vælges."
-                )
-
-            return selected_row
-
+            return matches[0]
         if len(matches) > 1:
             raise RuntimeError(
-                "Flere aktive sager matcher både "
-                f"SagsID-søgningen {sag!r} og Navn fra "
-                "Personoplysninger. Ingen sag vælges. "
-                f"Diagnose for aktive raekker={diagnostic!r}."
+                "Flere sager matcher den samme sagsnøgle/SagsID "
+                f"{sag!r}. Ingen sag vælges. "
+                f"Diagnose={diagnostic!r}."
             )
-
-        await page.wait_for_timeout(
-            POLL_INTERVAL_MS
-        )
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
-
     raise PlaywrightTimeoutError(
-        "Ingen aktiv sag matchede både "
-        f"SagsID-søgningen {sag!r} og Navn fra "
-        "Personoplysninger. "
-        f"Diagnose for aktive raekker={diagnostic!r}."
+        "Ingen sag matchede sagsnøglen/SagsID "
+        f"{sag!r}. "
+        f"Diagnose={diagnostic!r}."
     )
-
 def _journalnotat_normaliser_overskrift(
     value: object,
 ) -> str:
@@ -1470,109 +1344,146 @@ async def _journalnotat_find_editor(
 
 
 def _journalnotat_normaliser_sammenligning(value: object) -> str:
-    """Normalisér linjeskift og ydre whitespace til sikker kontrol."""
-    return (
-        str(value or "")
-        .replace("\r\n", "\n")
-        .replace("\r", "\n")
-        .strip()
-    )
+    """Normalisér tekst til indholdskontrol uafhængigt af TinyMCE-formattering.
+
+    TinyMCE kan omsætte linjeskift til afsnit, tilføje non-breaking spaces og
+    returnere andre whitespace-tegn via ``inner_text()`` end dem, processen
+    sendte ind. Kontrollen sammenligner derfor tekstindholdet ord for ord,
+    men ignorerer forskelle i whitespace og Unicode-normalform.
+    """
+    import unicodedata
+
+    tekst = unicodedata.normalize("NFC", str(value or ""))
+    tekst = tekst.replace("\u00a0", " ").replace("\u202f", " ")
+    return re.sub(r"\s+", " ", tekst).strip()
 
 
 async def _journalnotat_skriv_tekst(
     page: Page,
     journalnotat_tekst: str,
+    nummerplade: str | None,
     timeout: int,
 ) -> None:
-    """Erstat hele skabelonindholdet med den beregnede journalnotattekst."""
+    """Skriv journalnotatteksten robust, selv om TinyMCE genindlæser sin iframe."""
     forventet = str(journalnotat_tekst or "").strip()
     if not forventet:
         raise ValueError("journalnotat_tekst må ikke være tom.")
 
-    frame, editor = await _journalnotat_find_editor(
-        page=page,
-        timeout=timeout,
-    )
+    editor_id = "tilfoejedeJournalnotater0.notat"
+    deadline = monotonic() + timeout / 1000
+    seneste_fejl: Exception | None = None
 
-    # Skriv direkte i iframe-body'en. Der bruges ikke window.tinymce i
-    # iframe-vinduet, fordi KY ikke eksponerer TinyMCE-API'et dér.
-    await editor.fill(forventet)
-    await editor.dispatch_event("input")
-    await editor.dispatch_event("change")
-    await editor.dispatch_event("blur")
+    while monotonic() < deadline:
+        if page.is_closed():
+            raise RuntimeError(
+                "KY-siden blev lukket under journalnotatudfyldningen."
+            )
 
-    # Synkronisér med TinyMCE-instansen i parent-vinduet, hvis API'et findes.
-    # Ellers opdateres det underliggende formularfelt direkte.
-    await frame.evaluate(
-        """
-        ({ editorId, text }) => {
-            const body = document.body;
-            body.innerText = text;
+        resterende_ms = max(
+            POLL_INTERVAL_MS,
+            int((deadline - monotonic()) * 1000),
+        )
 
-            for (const eventType of ['input', 'change', 'blur']) {
-                body.dispatchEvent(
-                    new Event(eventType, { bubbles: true })
-                );
-            }
+        try:
+            frame, editor = await _journalnotat_find_editor(
+                page=page,
+                timeout=resterende_ms,
+            )
 
-            const parentWindow = window.parent;
-            const tinyMce = parentWindow && parentWindow.tinymce;
-            const instance = (
-                tinyMce && typeof tinyMce.get === 'function'
-                    ? tinyMce.get(editorId)
-                    : null
-            );
+            # Udfør skrivning og events i én operation inde i den aktuelle
+            # iframe. Det undgår flere Playwright-kald til en Locator, som kan
+            # blive ugyldig, hvis TinyMCE udskifter iframe'en mellem kald.
+            await editor.evaluate(
+                """
+                (body, arg) => {
+                    body.innerText = arg.text;
 
-            if (instance) {
-                instance.setContent(body.innerHTML);
-                instance.setDirty(true);
-                instance.fire('input');
-                instance.fire('change');
-                if (typeof instance.save === 'function') {
-                    instance.save();
+                    for (const eventType of ['input', 'change', 'blur']) {
+                        body.dispatchEvent(
+                            new Event(eventType, { bubbles: true })
+                        );
+                    }
+
+                    const parentWindow = window.parent;
+                    const tinyMce = parentWindow && parentWindow.tinymce;
+                    const instance = (
+                        tinyMce && typeof tinyMce.get === 'function'
+                            ? tinyMce.get(arg.editorId)
+                            : null
+                    );
+
+                    if (instance) {
+                        instance.setContent(body.innerHTML);
+                        instance.setDirty(true);
+                        instance.fire('input');
+                        instance.fire('change');
+                        if (typeof instance.save === 'function') {
+                            instance.save();
+                        }
+                        return;
+                    }
+
+                    const parentDocument = parentWindow.document;
+                    const backingField = (
+                        parentDocument.getElementById(arg.editorId)
+                        || parentDocument.querySelector(
+                            '[name="tilfoejedeJournalnotater[0].notat"]'
+                        )
+                    );
+
+                    if (!backingField) {
+                        throw new Error(
+                            'Journalnotatets underliggende formularfelt blev ikke fundet.'
+                        );
+                    }
+
+                    backingField.value = body.innerHTML;
+                    backingField.dispatchEvent(
+                        new Event('input', { bubbles: true })
+                    );
+                    backingField.dispatchEvent(
+                        new Event('change', { bubbles: true })
+                    );
                 }
-                return;
-            }
+                """,
+                {
+                    "editorId": editor_id,
+                    "text": forventet,
+                },
+            )
+            break
+        except PlaywrightError as error:
+            seneste_fejl = error
+            fejltekst = str(error).casefold()
+            if "frame was detached" not in fejltekst:
+                raise
 
-            const parentDocument = parentWindow.document;
-            const backingField = (
-                parentDocument.getElementById(editorId)
-                || parentDocument.querySelector(
-                    '[name="tilfoejedeJournalnotater[0].notat"]'
-                )
-            );
-
-            if (!backingField) {
-                throw new Error(
-                    'Journalnotatets underliggende formularfelt blev ikke fundet.'
-                );
-            }
-
-            backingField.value = body.innerHTML;
-            backingField.dispatchEvent(
-                new Event('input', { bubbles: true })
-            );
-            backingField.dispatchEvent(
-                new Event('change', { bubbles: true })
-            );
-        }
-        """,
-        {
-            "editorId": "tilfoejedeJournalnotater0.notat",
-            "text": forventet,
-        },
-    )
+            logger.info(
+                "TinyMCE-iframe blev udskiftet under skrivning. "
+                "Finder den aktuelle editor igen."
+            )
+            await page.wait_for_timeout(POLL_INTERVAL_MS)
+    else:
+        raise PlaywrightTimeoutError(
+            "Journalnotatteksten kunne ikke skrives, fordi TinyMCE-iframe "
+            "gentagne gange blev udskiftet."
+        ) from seneste_fejl
 
     await _journalnotat_kontroller_tekst(
         page=page,
         journalnotat_tekst=forventet,
-        timeout=timeout,
+        nummerplade=nummerplade,
+        timeout=max(
+            POLL_INTERVAL_MS,
+            int((deadline - monotonic()) * 1000),
+        ),
     )
 
 
 async def _journalnotat_kontroller_tekst(
     page: Page,
     journalnotat_tekst: str | None,
+    nummerplade: str | None,
     timeout: int,
 ) -> None:
     """Nægt Godkend, hvis editoren ikke indeholder den beregnede tekst."""
@@ -1600,6 +1511,23 @@ async def _journalnotat_kontroller_tekst(
         raise RuntimeError(
             "Journalnotatet indeholder stadig xxxx. "
             "KY-opgaven godkendes ikke."
+        )
+
+    forventet_nummerplade = re.sub(
+        r"[^A-Za-z0-9]",
+        "",
+        str(nummerplade or ""),
+    ).casefold()
+    if not forventet_nummerplade:
+        raise ValueError(
+            "nummerplade skal angives, før journalnotatet kan godkendes."
+        )
+
+    faktisk_uden_tegn = re.sub(r"[^A-Za-z0-9]", "", faktisk).casefold()
+    if forventet_nummerplade not in faktisk_uden_tegn:
+        raise RuntimeError(
+            "Journalnotatet indeholder ikke den forventede nummerplade "
+            f"{nummerplade!r}. KY-opgaven godkendes ikke."
         )
 
     # Kontrollér også det formularfelt, som KY sender ved Godkend.
@@ -1685,142 +1613,347 @@ async def _journalnotat_upload_dokument(
     forventet_sag_id: str,
     timeout: int,
 ) -> dict[str, str]:
-    """Upload til den aktuelle opgave og verificer ny raekke og filindhold.
+    """Vedhæft filen, vælg præcis den forventede sag og klik Gem én gang.
 
-    Ved fejl efter Gem maa processen ikke automatisk sende brevet igen.
-    En eksisterende raekke med samme filnavn stopper et nyt uploadforsog.
-    Den maa kontrolleres manuelt, da filnavnet ikke beviser sagstilknytning.
+    Sagen findes alene via rækkens tekniske ``data-id``. KY's synlige
+    readonly-felt skal derefter vise ``1 sag valgt``, og uploadformularens
+    ``selectedSagIds`` skal indeholde præcis ét input med det forventede id.
     """
     S = KYSelectors.Borgere
+    forventet_sag_id = str(forventet_sag_id or "").strip()
     if not forventet_sag_id:
         raise ValueError("Journalnotatets tekniske sag-id mangler.")
-    actual = await _journalnotat_hent_aktivt_opgave_id(page)
-    if actual.casefold() != str(checkpoint['opgave_id']).casefold():
-        raise RuntimeError("Aktiv opgave matcher ikke journalnotatets checkpoint.")
-    # Udvid kun Dokumenter-panelet paa den aktuelle opgave.
+
+    aktivt_opgave_id = await _journalnotat_hent_aktivt_opgave_id(page)
+    if aktivt_opgave_id.casefold() != str(checkpoint["opgave_id"]).casefold():
+        raise RuntimeError(
+            "Aktiv opgave matcher ikke journalnotatets checkpoint."
+        )
+
     panel = page.locator(S.JOURNALNOTAT_UPLOAD_PANEL)
     await expect(panel).to_have_count(1, timeout=timeout)
-    table = panel.locator(S.JOURNALNOTAT_UPLOAD_TABEL)
-    if not await table.is_visible():
+
+    dokumenttabel = panel.locator(S.JOURNALNOTAT_UPLOAD_TABEL)
+    if not await dokumenttabel.is_visible():
         toggle = panel.locator(S.JOURNALNOTAT_UPLOAD_PANEL_TOGGLE)
         await expect(toggle).to_have_count(1, timeout=timeout)
         await toggle.click(timeout=timeout)
-    await expect(table).to_be_visible(timeout=timeout)
-    rows = table.locator('tbody tr.table-row[data-id]')
-    before_ids = set(await rows.evaluate_all(
-        "rows => rows.map(row => row.getAttribute('data-id'))"
-    ))
-    # Brug textContent ogsaa for raekker paa andre klientside-tabelsider.
-    same_name = await rows.evaluate_all(
-        "(rows, name) => rows.some(r => Array.from(r.cells).some(c => c.textContent.trim() === name))",
-        fil['navn'],
-    )
-    if same_name:
-        raise RuntimeError(
-            "Et dokument med samme filnavn findes allerede paa opgaven. "
-            "Ingen ny upload foretages. Kontroller dokument og sag manuelt."
+    await expect(dokumenttabel).to_be_visible(timeout=timeout)
+
+    dokumentraekker = dokumenttabel.locator("tbody tr.table-row[data-id]")
+    eksisterende_ider = set(
+        await dokumentraekker.evaluate_all(
+            "rows => rows.map(row => row.getAttribute('data-id'))"
         )
-    button = panel.locator(S.JOURNALNOTAT_UPLOAD_AABN)
-    await expect(button).to_have_count(1, timeout=timeout)
-    await button.click(timeout=timeout)
-    form = page.locator(S.JOURNALNOTAT_UPLOAD_FORM)
-    await expect(form).to_have_count(1, timeout=timeout)
+    )
+    eksisterende_matches = await dokumentraekker.evaluate_all(
+        """
+        (rows, filnavn) => rows
+            .filter(row =>
+                Array.from(row.cells).some(cell =>
+                    (cell.textContent || '').trim() === filnavn
+                )
+            )
+            .map(row => ({
+                id: String(row.getAttribute('data-id') || '').trim(),
+                href: row.querySelector(
+                    'a[href*="/utilities/hentDokument/"]'
+                )?.getAttribute('href') || ''
+            }))
+        """,
+        fil["navn"],
+    )
+    if len(eksisterende_matches) > 1:
+        raise RuntimeError(
+            "Flere allerede vedhæftede dokumenter har samme filnavn. "
+            "Journalnotatet godkendes ikke automatisk."
+        )
+    if len(eksisterende_matches) == 1:
+        eksisterende = eksisterende_matches[0]
+        dokument_url = (
+            urljoin(page.url, eksisterende["href"])
+            if eksisterende["href"]
+            else ""
+        )
+        logger.info(
+            "Dokumentet %s er allerede vedhæftet. Upload springes over; "
+            "journalnotatteksten kontrolleres før Godkend.",
+            fil["navn"],
+        )
+        return {
+            "dokument_id": str(eksisterende["id"] or "eksisterende"),
+            "dokument_url": dokument_url,
+            "dokument_sha256": "",
+        }
+
+    aabn_upload = panel.locator(S.JOURNALNOTAT_UPLOAD_AABN)
+    await expect(aabn_upload).to_have_count(1, timeout=timeout)
+    await aabn_upload.click(timeout=timeout)
+
+    # KY henter modalens HTML asynkront efter klikket. Vent derfor på
+    # formularen i stedet for at undersøge DOM'en én enkelt gang med det samme.
+    formular_selector = "form#uploadFilForm"
+    deadline = monotonic() + timeout / 1000
+    formular_matches: list[tuple[object, Locator]] = []
+
+    while monotonic() < deadline:
+        formular_matches = []
+        for frame in page.frames:
+            formularer = frame.locator(formular_selector)
+            for index in range(await formularer.count()):
+                formular = formularer.nth(index)
+                if await formular.is_visible():
+                    formular_matches.append((frame, formular))
+
+        if len(formular_matches) == 1:
+            break
+        if len(formular_matches) > 1:
+            raise RuntimeError(
+                "Der blev fundet flere synlige uploadformularer på tværs af "
+                "hovedside og iframes. Uploaden afbrydes."
+            )
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+    else:
+        raise PlaywrightTimeoutError(
+            "Uploadvinduet blev åbnet, men form#uploadFilForm blev ikke "
+            "synlig inden timeout."
+        )
+
+    upload_frame, form = formular_matches[0]
     await expect(form).to_be_visible(timeout=timeout)
-    task_id = await form.locator('input[name="opgaveId"]').input_value()
-    if task_id.casefold() != actual.casefold():
-        raise RuntimeError("Uploadvinduet tilhoerer en anden opgave.")
-    # Ingen Windows-dialog: bytes sendes direkte til input[type=file].
-    await form.locator(S.JOURNALNOTAT_UPLOAD_FIL).set_input_files(
-        {"name": fil['navn'], "mimeType": 'application/pdf'
-         if fil['sti'].suffix.lower() == '.pdf' else 'application/octet-stream',
-         "buffer": fil['indhold']}, timeout=timeout,
+
+    opgave_id_felt = form.locator('input[name="opgaveId"]')
+    await expect(opgave_id_felt).to_have_count(1, timeout=timeout)
+    formularens_opgave_id = (await opgave_id_felt.input_value()).strip()
+    if formularens_opgave_id.casefold() != aktivt_opgave_id.casefold():
+        raise RuntimeError("Uploadvinduet tilhører en anden opgave.")
+
+    filinput = form.locator(S.JOURNALNOTAT_UPLOAD_FIL)
+    await expect(filinput).to_have_count(1, timeout=timeout)
+    await filinput.set_input_files(
+        {
+            "name": fil["navn"],
+            "mimeType": (
+                "application/pdf"
+                if fil["sti"].suffix.lower() == ".pdf"
+                else "application/octet-stream"
+            ),
+            "buffer": fil["indhold"],
+        },
+        timeout=timeout,
     )
-    field = form.locator(S.JOURNALNOTAT_UPLOAD_SAGSINPUT)
-    await field.click(timeout=timeout)
-    menu = form.locator('.sagsvaelger-list.dropdown-menu')
+
+    sagsfelt = form.locator(S.JOURNALNOTAT_UPLOAD_SAGSINPUT)
+    await expect(sagsfelt).to_have_count(1, timeout=timeout)
+    await sagsfelt.click(timeout=timeout)
+
+    menu = form.locator(".sagsvaelger-list.dropdown-menu:visible")
+    await expect(menu).to_have_count(1, timeout=timeout)
     await expect(menu).to_be_visible(timeout=timeout)
-    # Den allerede valgte journalnotatsag bestemmer status og teknisk id.
-    await menu.locator('input[data-tilstand="aktiv"]').set_checked(True, timeout=timeout)
-    await menu.locator('input[data-tilstand="passiv"]').set_checked(True, timeout=timeout)
-    table_sag = menu.locator('table#sagsvaelgertable')
-    target = table_sag.locator('tbody tr.table-row').filter(
-        has=page.locator('td.TEXT')
-    )
-    # Sammenlign attributter uden at interpolere input i CSS.
-    candidates = await target.evaluate_all(
-        "(rows, id) => rows.filter(r => r.getAttribute('data-id') === id).map(r => r.cells[0].textContent.trim())",
+
+    for tilstand in ("aktiv", "passiv"):
+        checkbox = menu.locator(
+            f'input[type="checkbox"][data-tilstand="{tilstand}"]'
+        )
+        if await checkbox.count() == 1 and not await checkbox.is_checked():
+            await checkbox.set_checked(True, timeout=timeout)
+
+    sagstabel = menu.locator("table#sagsvaelgertable")
+    await expect(sagstabel).to_have_count(1, timeout=timeout)
+    await expect(sagstabel).to_be_visible(timeout=timeout)
+
+    # Find rækken uden at interpolere sag-id'et i en CSS-selector.
+    raekke_indekser = await sagstabel.locator(
+        "tbody tr.table-row[data-id]"
+    ).evaluate_all(
+        """
+        (rows, expectedId) => rows
+            .map((row, index) => ({
+                index,
+                id: String(row.getAttribute('data-id') || '').trim()
+            }))
+            .filter(item => item.id === expectedId)
+            .map(item => item.index)
+        """,
         forventet_sag_id,
     )
-    if len(candidates) != 1 or not candidates[0]:
-        raise RuntimeError("Journalnotatets sag findes ikke entydigt i uploadvinduet.")
-    search = menu.locator(S.JOURNALNOTAT_UPLOAD_SAGSSOEG)
-    await search.fill(candidates[0], timeout=timeout)
-    await search.dispatch_event('keyup', timeout=timeout)
-    row = table_sag.locator('tbody tr.table-row:visible').filter(
-        has=page.get_by_text(candidates[0], exact=True)
+    if len(raekke_indekser) != 1:
+        raise RuntimeError(
+            "Uploadvinduet indeholder ikke præcis én sag med det forventede "
+            f"tekniske sag-id {forventet_sag_id!r}. "
+            f"Antal fundet={len(raekke_indekser)}."
+        )
+
+    sagsraekker = sagstabel.locator("tbody tr.table-row[data-id]")
+    sagsraekke = sagsraekker.nth(raekke_indekser[0])
+    vaelg_celle = sagsraekke.locator("td.select-row")
+    await expect(vaelg_celle).to_have_count(1, timeout=timeout)
+    await vaelg_celle.scroll_into_view_if_needed()
+    await vaelg_celle.click(timeout=timeout)
+
+    await expect(sagsfelt).to_have_value(
+        re.compile(r"^\s*1\s+sag\s+valgt\s*$", re.IGNORECASE),
+        timeout=timeout,
     )
-    await expect(row).to_have_count(1, timeout=timeout)
-    if await row.get_attribute('data-id') != forventet_sag_id:
-        raise RuntimeError("Uploadvinduets viste SagsID har forkert teknisk id.")
-    chosen = form.locator('input[name="selectedSagIds"][data-chosen="true"]:enabled')
-    if await chosen.count() == 0:
-        await row.locator('td.select-row').click(timeout=timeout)
-    await expect(field).to_have_value('1 sag valgt', timeout=timeout)
-    await expect(chosen).to_have_count(1, timeout=timeout)
-    await expect(chosen).to_have_value(forventet_sag_id, timeout=timeout)
-    # Luk kun sagsdropdownen, ikke uploadvinduet.
+
+    # KY har ét selectedSagIds-input pr. sag i listen. Kræv derfor ikke,
+    # at formularen kun indeholder ét input. Kræv præcis ét value-match.
+    selected_sag_ids = form.locator('input[name="selectedSagIds"]')
+    await expect(selected_sag_ids).not_to_have_count(0, timeout=timeout)
+    matchende_sag_ider = await selected_sag_ids.evaluate_all(
+        """
+        (inputs, expectedId) => inputs
+            .map((input, index) => ({
+                index,
+                value: String(input.value || '').trim(),
+                disabled: input.disabled
+            }))
+            .filter(item => item.value === expectedId)
+        """,
+        forventet_sag_id,
+    )
+    if len(matchende_sag_ider) != 1:
+        raise RuntimeError(
+            "Uploadformularen indeholder ikke præcis ét selectedSagIds-input "
+            f"med det forventede sag-id {forventet_sag_id!r}. "
+            f"Antal fundet={len(matchende_sag_ider)}."
+        )
+    if matchende_sag_ider[0]["disabled"]:
+        raise RuntimeError(
+            "selectedSagIds-inputtet med det forventede sag-id er disabled."
+        )
+
     if await menu.is_visible():
-        await menu.locator('button.close').click(timeout=timeout)
-        await expect(menu).to_be_hidden(timeout=timeout)
-    logger.info("Gemmer dokument paa journalnotatets verificerede sag.")
-    await form.locator(S.JOURNALNOTAT_UPLOAD_GEM).click(timeout=timeout)
-    # Gem klikkes aldrig igen automatisk ved timeout eller ukendt udfald.
+        luk_knap = menu.locator("button.close")
+        if await luk_knap.count() == 1:
+            await luk_knap.click(timeout=timeout)
+            await expect(menu).to_be_hidden(timeout=timeout)
+
+    gem = form.locator("button#uploadFilBtn")
+    await expect(gem).to_have_count(1, timeout=timeout)
+    await expect(gem).to_be_visible(timeout=timeout)
+    await expect(gem).to_be_enabled(timeout=timeout)
+    await gem.scroll_into_view_if_needed(timeout=timeout)
+
+    logger.info(
+        "Vedhæfter %s til journalnotatets sag %s og klikker Gem én gang.",
+        fil["navn"],
+        forventet_sag_id,
+    )
+    try:
+        await gem.click(timeout=timeout)
+    except PlaywrightError as klikfejl:
+        bounding_box = await gem.bounding_box()
+        if bounding_box is None:
+            raise RuntimeError(
+                "Gem-knappen er synlig, men dens placering kunne ikke bestemmes."
+            ) from klikfejl
+        klik_x = bounding_box["x"] + bounding_box["width"] / 2
+        klik_y = bounding_box["y"] + bounding_box["height"] / 2
+        logger.warning(
+            "Normalt klik på Gem fejlede (%s). Forsøger ét fysisk "
+            "museklik på knappens midtpunkt x=%.1f, y=%.1f.",
+            klikfejl,
+            klik_x,
+            klik_y,
+        )
+        await page.mouse.click(klik_x, klik_y)
+
     deadline = monotonic() + timeout / 1000
     while monotonic() < deadline:
         if page.is_closed():
-            raise RuntimeError("Siden lukkede efter upload-Gem. Udfald er ukendt.")
-        errors = form.locator(S.JOURNALNOTAT_UPLOAD_FEJL)
-        if await errors.count():
-            raise RuntimeError("KY afviste upload: " + ' | '.join(await errors.all_inner_texts()))
+            raise RuntimeError(
+                "Siden lukkede efter upload-Gem. Udfaldet er ukendt; "
+                "Gem må ikke klikkes igen automatisk."
+            )
+        fejl = form.locator(S.JOURNALNOTAT_UPLOAD_FEJL)
+        if await fejl.count():
+            raise RuntimeError(
+                "KY afviste uploaden: "
+                + " | ".join(await fejl.all_inner_texts())
+            )
         if not await form.is_visible():
             break
         await page.wait_for_timeout(POLL_INTERVAL_MS)
     else:
-        raise PlaywrightTimeoutError("Uploadvinduet lukkede ikke. Kontroller KY foer genkoersel.")
+        raise PlaywrightTimeoutError(
+            "Uploadvinduet lukkede ikke efter Gem. Kontrollér KY før genkørsel."
+        )
+
     deadline = monotonic() + timeout / 1000
     while monotonic() < deadline:
-        matches = await rows.evaluate_all(
-            """(rows, arg) => rows.filter(r =>
-                !arg.ids.includes(r.getAttribute('data-id')) &&
-                Array.from(r.cells).some(c => c.textContent.trim() === arg.name)
-            ).map(r => ({id: r.getAttribute('data-id'),
-                href: r.querySelector('a[href*="/utilities/hentDokument/"]')?.getAttribute('href') || ''}))""",
-            {"ids": list(before_ids), "name": fil['navn']},
+        nye_matches = await dokumentraekker.evaluate_all(
+            """
+            (rows, arg) => rows
+                .filter(row =>
+                    !arg.ids.includes(row.getAttribute('data-id'))
+                    && Array.from(row.cells).some(cell =>
+                        (cell.textContent || '').trim() === arg.name
+                    )
+                )
+                .map(row => ({
+                    id: row.getAttribute('data-id'),
+                    href: row.querySelector(
+                        'a[href*="/utilities/hentDokument/"]'
+                    )?.getAttribute('href') || ''
+                }))
+            """,
+            {"ids": list(eksisterende_ider), "name": fil["navn"]},
         )
-        if len(matches) > 1:
-            raise RuntimeError("Flere nye dokumentraekker matcher. Notatet godkendes ikke.")
-        if len(matches) == 1 and matches[0]['href']:
-            match = matches[0]
-            url = urljoin(page.url, match['href'])
-            parsed = urlparse(url)
-            expected_pid = parse_qs(urlparse(checkpoint['borger_url']).query).get('pId', [])
-            if (parsed.scheme, parsed.netloc) != (urlparse(page.url).scheme, urlparse(page.url).netloc):
-                raise RuntimeError("Dokumentlinket peger uden for den aktive KY-server.")
-            if parsed.path.rstrip('/').split('/')[-1] != match['id']:
-                raise RuntimeError("Dokumentlinkets id matcher ikke raekken.")
-            if expected_pid and parse_qs(parsed.query).get('pId') != expected_pid:
+        if len(nye_matches) > 1:
+            raise RuntimeError(
+                "Flere nye dokumentrækker matcher filnavnet. "
+                "Journalnotatet godkendes ikke."
+            )
+        if len(nye_matches) == 1 and nye_matches[0]["href"]:
+            match = nye_matches[0]
+            dokument_url = urljoin(page.url, match["href"])
+            parsed = urlparse(dokument_url)
+            aktiv_url = urlparse(page.url)
+            if (parsed.scheme, parsed.netloc) != (
+                aktiv_url.scheme,
+                aktiv_url.netloc,
+            ):
+                raise RuntimeError(
+                    "Dokumentlinket peger uden for den aktive KY-server."
+                )
+
+            forventede_pids = parse_qs(
+                urlparse(checkpoint["borger_url"]).query
+            ).get("pId", [])
+            if forventede_pids and parse_qs(parsed.query).get("pId") != forventede_pids:
                 raise RuntimeError("Dokumentlinkets pId matcher ikke borgeren.")
-            response = await page.context.request.get(url, timeout=timeout, max_redirects=0)
+
+            response = await page.context.request.get(
+                dokument_url,
+                timeout=timeout,
+                max_redirects=0,
+            )
             try:
                 if response.status != 200:
-                    raise RuntimeError("Dokumentkontrollen fik HTTP-fejl eller redirect.")
-                digest = hashlib.sha256(await response.body()).hexdigest()
+                    raise RuntimeError(
+                        "Dokumentkontrollen fik HTTP-fejl eller redirect."
+                    )
+                dokument_sha256 = hashlib.sha256(
+                    await response.body()
+                ).hexdigest()
             finally:
                 await response.dispose()
-            if digest != fil['sha256']:
-                raise RuntimeError("Uploadet fil matcher ikke kildefilen byte for byte.")
-            logger.info("Ny dokumentraekke og identisk filindhold er verificeret.")
-            return {"dokument_id": match['id'], "dokument_url": url,
-                    "dokument_sha256": digest}
+
+            if dokument_sha256 != fil["sha256"]:
+                raise RuntimeError(
+                    "Det uploadede dokument matcher ikke kildefilen byte for byte."
+                )
+
+            return {
+                "dokument_id": str(match["id"] or ""),
+                "dokument_url": dokument_url,
+                "dokument_sha256": dokument_sha256,
+            }
+
         await page.wait_for_timeout(POLL_INTERVAL_MS)
-    raise PlaywrightTimeoutError("Ingen ny dokumentraekke blev verificeret. Notatet godkendes ikke.")
+
+    raise PlaywrightTimeoutError(
+        "Gem blev udført, men den nye dokumentrække kunne ikke verificeres. "
+        "Journalnotatet godkendes ikke automatisk."
+    )

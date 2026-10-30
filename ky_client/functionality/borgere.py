@@ -39,6 +39,15 @@ CHECKPOINT_FELTER: dict[str, tuple[str, str, str]] = {
     ),
 }
 
+# START: CHECKPOINT_BOX_FELTER
+
+CHECKPOINT_BOX_FELTER = {
+    "send_brev": "Send brev checkpoint",
+    "journalnotat": "Journalnotat checkpoint",
+    "opfoelgningsopgave": "Opfølgningsopgave checkpoint",
+}
+
+# SLUT: CHECKPOINT_BOX_FELTER
 
 class Personoplysning(TypedDict):
     """En synlig nøgle/værdi-række fra Personoplysninger."""
@@ -1826,19 +1835,65 @@ def _checkpoint_feltnavne(
 
     return CHECKPOINT_FELTER[checkpoint_type]
 
+# START: _hent_checkpoint_box_feltnavn
+
+def _hent_checkpoint_box_feltnavn(
+    checkpoint_type: str,
+) -> str:
+    """Returnér navnet på dictionary-checkpointet i itemets box.
+
+    Eksempler:
+        journalnotat
+            -> Journalnotat checkpoint
+
+        opfoelgningsopgave
+            -> Opfølgningsopgave checkpoint
+    """
+    checkpoint_type = _normaliser_checkpoint_type(
+        checkpoint_type
+    )
+
+    box_feltnavn = CHECKPOINT_BOX_FELTER.get(
+        checkpoint_type
+    )
+
+    if not box_feltnavn:
+        raise ValueError(
+            "Der findes ikke et dictionary-checkpointfelt for "
+            f"checkpoint_type={checkpoint_type!r}."
+        )
+
+    return box_feltnavn
+
+# SLUT: _hent_checkpoint_box_feltnavn
+
+# START: hent_opgavecheckpoint_fra_item_data
 
 def hent_opgavecheckpoint_fra_item_data(
     item_data: dict[str, Any] | None,
     checkpoint_type: str,
 ) -> dict[str, str] | None:
-    """
-    Hent et handlingsspecifikt checkpoint fra item_data["box"].
+    """Hent og reparér et handlingsspecifikt checkpoint fra itemets box.
 
-    Hvis ingen af de tre felter er udfyldt, returneres None.
-    Hvis checkpointet er delvist udfyldt, returneres de fundne data,
-    så opstart_opgave kan validere eller udlede manglende ID fra URL.
-    """
+    Funktionen læser både de flade checkpointfelter:
 
+        Journalnotat Opgave-Id
+        Journalnotat Opgave URL
+        Journalnotat Opgavenavn
+
+    og det komplette dictionary-checkpoint:
+
+        Journalnotat checkpoint
+
+    Når dictionary-checkpointet indeholder en ``borger_url`` med et gyldigt
+    ``pId``, sammensættes den korrekte genoptagelses-URL af:
+
+        pId fra borger_url
+        opgaveId fra det gemte handlingsspecifikke opgave-id
+
+    En gemt ``/opgave/undock/<id>``-URL bruges dermed kun til validering af
+    opgave-id'et. Den bruges ikke som den endelige navigations-URL.
+    """
     if item_data is None:
         return None
 
@@ -1854,37 +1909,188 @@ def hent_opgavecheckpoint_fra_item_data(
             "item_data['box'] skal være en dictionary."
         )
 
+    checkpoint_type = _normaliser_checkpoint_type(
+        checkpoint_type
+    )
+
     id_key, url_key, navn_key = _checkpoint_feltnavne(
         checkpoint_type
     )
 
-    opgave_id = str(
-        box.get(id_key) or ""
-    ).strip()
+    dictionary_key = _hent_checkpoint_box_feltnavn(
+        checkpoint_type
+    )
 
-    opgave_url = str(
-        box.get(url_key) or ""
-    ).strip()
+    dictionary_checkpoint_raw = box.get(
+        dictionary_key
+    )
+
+    if (
+        dictionary_checkpoint_raw is not None
+        and not isinstance(dictionary_checkpoint_raw, dict)
+    ):
+        raise TypeError(
+            f"box[{dictionary_key!r}] skal være en dictionary."
+        )
+
+    dictionary_checkpoint = (
+        dictionary_checkpoint_raw
+        if isinstance(dictionary_checkpoint_raw, dict)
+        else {}
+    )
+
+    # De flade handlingsspecifikke felter har første prioritet.
+    # Dictionary-checkpointet bruges som sikkert fallback.
+    opgave_id = _opstart_normaliser_id(
+        box.get(id_key)
+        or dictionary_checkpoint.get("opgave_id")
+    )
 
     opgave_navn = _opstart_normaliser_tekst(
-        box.get(navn_key) or ""
+        box.get(navn_key)
+        or dictionary_checkpoint.get("opgave_navn")
+        or ""
+    )
+
+    flad_opgave_url = _opstart_normaliser_tekst(
+        box.get(url_key)
+        or ""
+    )
+
+    dictionary_opgave_url = _opstart_normaliser_tekst(
+        dictionary_checkpoint.get("opgave_url")
+        or ""
+    )
+
+    gemt_opgave_url = (
+        flad_opgave_url
+        or dictionary_opgave_url
+    )
+
+    borger_url = _opstart_normaliser_tekst(
+        dictionary_checkpoint.get("borger_url")
+        or ""
     )
 
     if not any(
         (
             opgave_id,
-            opgave_url,
+            gemt_opgave_url,
             opgave_navn,
+            borger_url,
         )
     ):
         return None
 
+    # Hvis ID'et mangler i det flade felt, forsøges det udledt fra en af
+    # checkpointets URL'er.
+    if not opgave_id:
+        for kandidat_url in (
+            gemt_opgave_url,
+            borger_url,
+        ):
+            if not kandidat_url:
+                continue
+
+            udledt_id = hent_opgave_id_fra_url(
+                kandidat_url
+            )
+
+            if udledt_id:
+                opgave_id = udledt_id
+                break
+
+    if not opgave_id:
+        raise RuntimeError(
+            "Der findes et gemt checkpoint, men opgave-id mangler "
+            "og kan ikke udledes fra checkpointets URL'er. "
+            f"Checkpoint-type={checkpoint_type!r}."
+        )
+
+    # Kontrollér, at eventuelle gemte URL'er ikke peger på en anden opgave.
+    for navn, kandidat_url in (
+        ("fladt opgavefelt", flad_opgave_url),
+        ("dictionary-opgavefelt", dictionary_opgave_url),
+    ):
+        if not kandidat_url:
+            continue
+
+        url_opgave_id = hent_opgave_id_fra_url(
+            kandidat_url
+        )
+
+        if (
+            url_opgave_id
+            and url_opgave_id.casefold()
+            != opgave_id.casefold()
+        ):
+            raise RuntimeError(
+                "Checkpointets opgave-id matcher ikke opgave-id'et "
+                f"i {navn}. Intet åbnes. "
+                f"Checkpoint-type={checkpoint_type!r}, "
+                f"gemt id={opgave_id!r}, "
+                f"URL-id={url_opgave_id!r}, "
+                f"URL={kandidat_url!r}."
+            )
+
+    person_id = ""
+
+    # Første prioritet er dictionary-checkpointets borger_url, fordi den
+    # repræsenterer borgeren på tidspunktet, hvor opgaven blev oprettet.
+    if borger_url:
+        person_id = _hent_person_id_fra_borger_url(
+            borger_url
+        )
+
+    # Bagudkompatibilitet: ældre checkpoints kan have gemt overblik-URL'en
+    # direkte som opgave_url.
+    if not person_id and gemt_opgave_url:
+        person_id = _hent_person_id_fra_borger_url(
+            gemt_opgave_url
+        )
+
+    if not person_id:
+        raise RuntimeError(
+            "Det gemte checkpoint indeholder ikke et gyldigt pId. "
+            "Hverken dictionary-checkpointets borger_url eller den "
+            "gemte opgave_url kan bruges til sikker genoptagelse. "
+            f"Checkpoint-type={checkpoint_type!r}."
+        )
+
+    url_grundlag = (
+        borger_url
+        or gemt_opgave_url
+    )
+
+    if not url_grundlag:
+        raise RuntimeError(
+            "Checkpointet mangler et absolut URL-grundlag til "
+            "sammensætning af genoptagelses-URL'en."
+        )
+
+    korrekt_opgave_url = _byg_opgave_overblik_url(
+        borger_url=url_grundlag,
+        person_id=person_id,
+        opgave_id=opgave_id,
+    )
+
+    logger.info(
+        "Checkpoint-URL blev sammensat fra box-data. "
+        "Checkpoint-type=%r, opgave-id=%r, pId=%r, URL=%r.",
+        checkpoint_type,
+        opgave_id,
+        person_id,
+        korrekt_opgave_url,
+    )
+
     return {
         "opgave_id": opgave_id,
-        "opgave_url": opgave_url,
+        "opgave_url": korrekt_opgave_url,
         "opgave_navn": opgave_navn,
+        "borger_url": borger_url or korrekt_opgave_url,
     }
 
+# SLUT: hent_opgavecheckpoint_fra_item_data
 
 def _gem_opgavecheckpoint_i_item_data(
     item_data: dict[str, Any] | None,
@@ -3234,19 +3440,51 @@ async def _modtag_post_vent_paa_dokumentpanel_aabent(
     )
 
 
+# START: _modtag_post_find_dokumentraekke
+
 async def _modtag_post_find_dokumentraekke(
     page: Page,
     dokument_panel: Locator,
     dokument: str,
     timeout: int,
 ) -> Locator | None:
-    """Find én dokumentrække via eksakt cellematch eller delvist match."""
-    wanted = _modtag_post_normaliser_tekst(dokument).casefold()
+    """Find præcis én dokumentrække med et stabilt dokumentmatch.
+
+    Dokumentnavnet må gerne indeholde ekstra tekst efter søgekriteriet.
+
+    Eksempel:
+        Søgekriterium:
+            Kontrolark p10
+
+        Dokumentnavn i KY:
+            Kontrolark p10 20260925
+
+        Resultat:
+            Rækken matcher.
+
+    Funktionen venter på stabilt tabelindhold, så et midlertidigt tomt eller
+    delvist indlæst DataTables-resultat ikke fejlagtigt bliver behandlet som
+    "dokument ikke fundet".
+    """
+    wanted = _modtag_post_normaliser_tekst(
+        dokument
+    ).casefold()
+
+    if not wanted:
+        raise ValueError(
+            "Dokumentkriteriet må ikke være tomt."
+        )
+
     p10_pattern = re.compile(
-        r"(?<![A-Za-z0-9])P10[\s_-]*\d+(?!\d)",
+        r"(?<![A-Za-z0-9])P10[\s_-]*\d*(?![A-Za-z0-9])",
         re.IGNORECASE,
     )
+
     elapsed_ms = 0
+    stable_checks = 0
+    required_stable_checks = 4
+    previous_signature: tuple[str, ...] | None = None
+    latest_row_texts: list[str] = []
 
     while elapsed_ms < timeout:
         if page.is_closed():
@@ -3257,67 +3495,190 @@ async def _modtag_post_find_dokumentraekke(
         rows = dokument_panel.locator(
             KYSelectors.Borgere.MODTAG_POST_DOKUMENTER_RAEKKER
         )
-        eksakte: list[tuple[Locator, str]] = []
-        delvise: list[tuple[Locator, str]] = []
-        laesbare_raekker = 0
 
-        for index in range(await rows.count()):
+        exact_matches: list[tuple[Locator, str]] = []
+        partial_matches: list[tuple[Locator, str]] = []
+        row_texts: list[str] = []
+
+        row_count = await rows.count()
+
+        for index in range(row_count):
             row = rows.nth(index)
+
             try:
                 if not await row.is_visible():
                     continue
+
                 row_text = _modtag_post_normaliser_tekst(
                     await row.inner_text()
                 )
+
                 if not row_text:
                     continue
-                laesbare_raekker += 1
 
-                if wanted == "p10":
-                    if p10_pattern.search(row_text):
-                        eksakte.append((row, row_text))
+                # DataTables kan vise en informationsrække, mens tabellen
+                # indlæses. Den må ikke tælle som et dokument.
+                normalized_row_text = row_text.casefold()
+
+                if (
+                    "ingen data tilgængelig" in normalized_row_text
+                    or "ingen matchende poster fundet" in normalized_row_text
+                    or "no matching records found" in normalized_row_text
+                ):
                     continue
+
+                row_texts.append(row_text)
 
                 cells = row.locator(
                     KYSelectors.Borgere.MODTAG_POST_DOKUMENTER_CELLER
                 )
+
                 cell_values: list[str] = []
-                for cell_index in range(await cells.count()):
-                    cell = cells.nth(cell_index)
-                    if await cell.is_visible():
-                        value = _modtag_post_normaliser_tekst(
-                            await cell.inner_text()
-                        )
-                        if value:
-                            cell_values.append(value)
 
-                if (
-                    any(value.casefold() == wanted for value in cell_values)
-                    or row_text.casefold() == wanted
+                for cell_index in range(
+                    await cells.count()
                 ):
-                    eksakte.append((row, row_text))
-                elif wanted in row_text.casefold():
-                    delvise.append((row, row_text))
-            except PlaywrightError:
-                continue
+                    cell = cells.nth(cell_index)
 
-        matches = eksakte if eksakte else delvise
+                    if not await cell.is_visible():
+                        continue
+
+                    cell_value = _modtag_post_normaliser_tekst(
+                        await cell.inner_text()
+                    )
+
+                    if cell_value:
+                        cell_values.append(cell_value)
+
+                normalized_cells = [
+                    value.casefold()
+                    for value in cell_values
+                ]
+
+                # Første prioritet er et eksakt cellematch.
+                if any(
+                    value == wanted
+                    for value in normalized_cells
+                ):
+                    exact_matches.append(
+                        (row, row_text)
+                    )
+                    continue
+
+                # Dokumentnavnet kan være efterfulgt af dato, løbenummer
+                # eller anden KY-genereret tekst.
+                if any(
+                    wanted in value
+                    for value in normalized_cells
+                ):
+                    partial_matches.append(
+                        (row, row_text)
+                    )
+                    continue
+
+                # Fallback til hele rækketeksten. Det håndterer blandt andet,
+                # at dokumentnavnet bliver delt over flere HTML-elementer.
+                if wanted in normalized_row_text:
+                    partial_matches.append(
+                        (row, row_text)
+                    )
+                    continue
+
+                # Bevar klientens særlige understøttelse af det generelle
+                # søgekriterium "p10".
+                if (
+                    wanted == "p10"
+                    and p10_pattern.search(row_text)
+                ):
+                    partial_matches.append(
+                        (row, row_text)
+                    )
+
+            except PlaywrightError as error:
+                logger.debug(
+                    "Dokumentrække %d kunne ikke læses endnu. "
+                    "Fejltype=%s, fejl=%s.",
+                    index + 1,
+                    type(error).__name__,
+                    error,
+                )
+
+        matches = (
+            exact_matches
+            if exact_matches
+            else partial_matches
+        )
+
         if len(matches) == 1:
-            return matches[0][0]
+            matched_row, matched_text = matches[0]
+
+            logger.info(
+                "Dokument fundet. Kriterium=%r, rækketekst=%r.",
+                dokument,
+                matched_text,
+            )
+
+            return matched_row
+
         if len(matches) > 1:
             raise RuntimeError(
                 "Flere dokumentrækker matcher kriteriet. "
                 f"Dokument={dokument!r}, "
                 f"matches={[text for _, text in matches]!r}."
             )
-        if laesbare_raekker > 0:
+
+        current_signature = tuple(
+            row_texts
+        )
+
+        if (
+            current_signature
+            and current_signature == previous_signature
+        ):
+            stable_checks += 1
+        else:
+            previous_signature = current_signature
+            stable_checks = 1 if current_signature else 0
+
+        latest_row_texts = row_texts
+
+        if elapsed_ms % 2_000 == 0:
+            logger.info(
+                "Søger efter dokument. "
+                "Kriterium=%r, antal DOM-rækker=%d, "
+                "læste dokumentrækker=%r, stabilitet=%d/%d.",
+                dokument,
+                row_count,
+                row_texts,
+                stable_checks,
+                required_stable_checks,
+            )
+
+        if stable_checks >= required_stable_checks:
+            logger.info(
+                "Dokumenttabellen er stabil, men intet dokument "
+                "matcher kriteriet. Kriterium=%r, dokumentrækker=%r.",
+                dokument,
+                latest_row_texts,
+            )
+
             return None
 
-        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        await page.wait_for_timeout(
+            POLL_INTERVAL_MS
+        )
         elapsed_ms += POLL_INTERVAL_MS
+
+    logger.info(
+        "Dokumentsøgningen udløb uden match. "
+        "Kriterium=%r, senest læste dokumentrækker=%r.",
+        dokument,
+        latest_row_texts,
+    )
 
     return None
 
+# SLUT: _modtag_post_find_dokumentraekke
 
 async def _modtag_post_find_dokumentlink(
     matchende_raekke: Locator,
