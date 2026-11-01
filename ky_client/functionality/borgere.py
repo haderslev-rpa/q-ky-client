@@ -1867,8 +1867,6 @@ def _hent_checkpoint_box_feltnavn(
 
 # SLUT: _hent_checkpoint_box_feltnavn
 
-# START: hent_opgavecheckpoint_fra_item_data
-
 def hent_opgavecheckpoint_fra_item_data(
     item_data: dict[str, Any] | None,
     checkpoint_type: str,
@@ -2050,12 +2048,27 @@ def hent_opgavecheckpoint_fra_item_data(
         )
 
     if not person_id:
-        raise RuntimeError(
-            "Det gemte checkpoint indeholder ikke et gyldigt pId. "
-            "Hverken dictionary-checkpointets borger_url eller den "
-            "gemte opgave_url kan bruges til sikker genoptagelse. "
-            f"Checkpoint-type={checkpoint_type!r}."
+        # Checkpointet har et sikkert handlingsspecifikt opgave-id, men ingen
+        # URL med pId. Returnér derfor checkpointet uden opgave_url. Det får
+        # opstart_opgave() til at bruge sit eksisterende fallback og finde
+        # præcis samme opgave i tabellen "Ubehandlede opgaver" ud fra både
+        # opgave-id og opgavenavn. Der kopieres aldrig URL fra en anden
+        # opgavetype, og der oprettes ikke en ny opgave.
+        logger.warning(
+            "Checkpointet mangler en sikker URL med pId. "
+            "Genoptagelse fortsætter via Ubehandlede opgaver. "
+            "Checkpoint-type=%r, opgave-id=%r, opgavenavn=%r.",
+            checkpoint_type,
+            opgave_id,
+            opgave_navn,
         )
+
+        return {
+            "opgave_id": opgave_id,
+            "opgave_url": "",
+            "opgave_navn": opgave_navn,
+            "borger_url": "",
+        }
 
     url_grundlag = (
         borger_url
@@ -2089,8 +2102,6 @@ def hent_opgavecheckpoint_fra_item_data(
         "opgave_navn": opgave_navn,
         "borger_url": borger_url or korrekt_opgave_url,
     }
-
-# SLUT: hent_opgavecheckpoint_fra_item_data
 
 def _gem_opgavecheckpoint_i_item_data(
     item_data: dict[str, Any] | None,
