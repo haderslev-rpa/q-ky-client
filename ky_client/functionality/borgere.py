@@ -1867,6 +1867,8 @@ def _hent_checkpoint_box_feltnavn(
 
 # SLUT: _hent_checkpoint_box_feltnavn
 
+# START: hent_opgavecheckpoint_fra_item_data
+
 def hent_opgavecheckpoint_fra_item_data(
     item_data: dict[str, Any] | None,
     checkpoint_type: str,
@@ -2049,10 +2051,10 @@ def hent_opgavecheckpoint_fra_item_data(
 
     if not person_id:
         # Checkpointet har et sikkert handlingsspecifikt opgave-id, men ingen
-        # URL med pId. Returnér derfor checkpointet uden opgave_url. Det får
-        # opstart_opgave() til at bruge sit eksisterende fallback og finde
-        # præcis samme opgave i tabellen "Ubehandlede opgaver" ud fra både
-        # opgave-id og opgavenavn. Der kopieres aldrig URL fra en anden
+        # URL med pId. Returnér derfor checkpointet uden opgave_url, så
+        # opstart_opgave() bruger sit eksisterende sikre fallback og finder
+        # præcis samme opgave i borgerens tabel "Ubehandlede opgaver" ud fra
+        # både opgave-id og opgavenavn. Der kopieres ikke URL fra en anden
         # opgavetype, og der oprettes ikke en ny opgave.
         logger.warning(
             "Checkpointet mangler en sikker URL med pId. "
@@ -2102,6 +2104,8 @@ def hent_opgavecheckpoint_fra_item_data(
         "opgave_navn": opgave_navn,
         "borger_url": borger_url or korrekt_opgave_url,
     }
+
+# SLUT: hent_opgavecheckpoint_fra_item_data
 
 def _gem_opgavecheckpoint_i_item_data(
     item_data: dict[str, Any] | None,
@@ -2965,7 +2969,7 @@ async def _modtag_post_hent_sags_id_fra_opgave(
     #
     # Fjern kun de omgivende firkantede parenteser.
     match = re.fullmatch(
-        r"\[\s*([^\[\]]+?)\s*\]",
+        r"[\s*([^[]]+?)\s*]",
         value,
     )
 
