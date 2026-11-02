@@ -477,13 +477,52 @@ async def _aabn_opfoelgningsformular(
     passive_sager: bool,
     timeout: int,
 ) -> None:
-    """Vælg den forventede sag på første trin og åbn formularen.
+    """Vælg sagen på første trin og åbn opfølgningsformularen.
 
-    Hvis opfølgningsformularen allerede er synlig, ændres intet.
-    Ingen sag vælges ved manglende eller tvetydigt SagsID.
+    Hvis den egentlige opfølgningsformular allerede er åben, returnerer
+    funktionen straks. Kontrollen bruger flere uafhængige signaler og er
+    derfor ikke afhængig af ét bestemt select-id.
     """
-    formular = page.locator("select#opfoelgningsType:visible")
-    if await formular.count() > 0:
+    if page.is_closed():
+        raise RuntimeError(
+            "KY-siden er lukket før opfølgningsformularen "
+            "kunne åbnes."
+        )
+
+    opgaveformular = page.locator(
+        "form#opgaveForm:visible"
+    )
+
+    godkend_knap = page.locator(
+        "form#opgaveForm:visible "
+        "button.submit-opgave"
+        "[data-href='/opgave/handling/fortsaet']:visible"
+    )
+
+    godkend_accesskey = page.locator(
+        "form#opgaveForm:visible "
+        "button:visible span[accesskey='G']"
+    )
+
+    opfoelgningstype = page.locator(
+        "form#opgaveForm:visible "
+        "select#opfoelgningsType:visible"
+    )
+
+    formular_er_aaben = (
+        await opgaveformular.count() == 1
+        and (
+            await opfoelgningstype.count() > 0
+            or await godkend_knap.count() == 1
+            or await godkend_accesskey.count() == 1
+        )
+    )
+
+    if formular_er_aaben:
+        logger.info(
+            "Opfølgningsformularen er allerede åben. "
+            "Sagsvælgerens første trin springes over."
+        )
         return
 
     if not sag or not _normaliser_tekst(sag):
@@ -491,35 +530,45 @@ async def _aabn_opfoelgningsformular(
             "Sagsvælgeren vises før formularen. Angiv sag= med "
             "borgerens konkrete SagsID."
         )
-    if not aktive_sager and not passive_sager:
-        raise ValueError("Mindst én sagsstatus skal vælges.")
 
-    # Bekræftet ud fra HTML'en for feltet "Ingen sager valgt".
+    if not aktive_sager and not passive_sager:
+        raise ValueError(
+            "Mindst én sagsstatus skal vælges."
+        )
+
     inputs = page.locator(
         'input[id="command.sagsId.valueString"]'
         ".sagsvaelger-input[readonly]:visible"
     )
-    await inputs.first.wait_for(state="visible", timeout=timeout)
+
+    await inputs.first.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
+
     if await inputs.count() != 1:
         raise RuntimeError(
             "Forventede præcis ét synligt input til sagsvælgeren."
         )
+
     field = inputs.first
 
-    # Den følgende container- og menustruktur er endnu ikke bekræftet
-    # for opfølgningsopgaven. Stop sikkert, hvis den ikke matcher.
     root = field.locator(
         "xpath=ancestor::div["
         "contains(concat(' ', normalize-space(@class), ' '), "
         "' sagsvaelger ')][1]"
     )
+
     if await root.count() != 1:
         raise RuntimeError(
             "Inputfeltet blev fundet, men sagsvælgerens "
             "container kunne ikke identificeres entydigt."
         )
 
-    menu = root.locator("div.sagsvaelger-list.dropdown-menu")
+    menu = root.locator(
+        "div.sagsvaelger-list.dropdown-menu"
+    )
+
     if await menu.count() != 1:
         raise RuntimeError(
             "Inputfeltet blev fundet, men sagsvælgerens "
@@ -530,15 +579,23 @@ async def _aabn_opfoelgningsformular(
         toggle = root.locator(
             "div.dropdown-toggle[data-toggle='dropdown']"
         )
+
         if await toggle.count() != 1:
             raise RuntimeError(
                 "Sagsvælgerens åbn-knap er ikke entydig."
             )
+
         await toggle.click(
-            timeout=min(ACTION_TIMEOUT_MS, timeout)
+            timeout=min(
+                ACTION_TIMEOUT_MS,
+                timeout,
+            )
         )
 
-    await menu.wait_for(state="visible", timeout=timeout)
+    await menu.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
 
     for status, checked in (
         ("aktiv", aktive_sager),
@@ -547,46 +604,63 @@ async def _aabn_opfoelgningsformular(
         checkbox = menu.locator(
             f"input[type='checkbox'][data-tilstand='{status}']"
         )
+
         if await checkbox.count() != 1:
             raise RuntimeError(
                 f"Checkboxen for {status} sag er ikke entydig."
             )
+
         await checkbox.set_checked(
             checked,
-            timeout=min(ACTION_TIMEOUT_MS, timeout),
+            timeout=min(
+                ACTION_TIMEOUT_MS,
+                timeout,
+            ),
         )
 
-    search = menu.locator("input.sagsvaelger-soeg:visible")
+    search = menu.locator(
+        "input.sagsvaelger-soeg:visible"
+    )
+
     if await search.count() != 1:
         raise RuntimeError(
             "Sagsvælgerens søgefelt er ikke entydigt."
         )
+
     await search.fill(sag)
     await search.dispatch_event("input")
     await search.dispatch_event("keyup")
 
-    table = menu.locator("table:visible")
-    await table.first.wait_for(state="visible", timeout=timeout)
+    table = menu.locator(
+        "table:visible"
+    )
+
+    await table.first.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
+
     if await table.count() != 1:
         raise RuntimeError(
             "Sagsvælgerens resultattabel er ikke entydig."
         )
-    table = table.first
 
+    table = table.first
     header_cells = table.locator("thead th")
     headers = [
         _normaliser_tekst(
-            await header_cells.nth(i).inner_text()
+            await header_cells.nth(index).inner_text()
         ).casefold()
-        for i in range(await header_cells.count())
+        for index in range(await header_cells.count())
     ]
+
     if headers.count("sagsid") != 1:
         raise RuntimeError(
             "Sagsvælgeren mangler en entydig SagsID-kolonne."
         )
+
     sags_id_index = headers.index("sagsid")
     forventet_sags_id = _normaliser_tekst(sag).casefold()
-
     matchende_raekker: list[Locator] = []
     elapsed_ms = 0
 
@@ -594,9 +668,10 @@ async def _aabn_opfoelgningsformular(
         matchende_raekker.clear()
         rows = table.locator("tbody tr.table-row:visible")
 
-        for i in range(await rows.count()):
-            row = rows.nth(i)
+        for index in range(await rows.count()):
+            row = rows.nth(index)
             cells = row.locator("td")
+
             if await cells.count() != len(headers):
                 raise RuntimeError(
                     "Sagsrækkens kolonner matcher ikke overskrifterne."
@@ -605,6 +680,7 @@ async def _aabn_opfoelgningsformular(
             faktisk_sags_id = _normaliser_tekst(
                 await cells.nth(sags_id_index).inner_text()
             ).casefold()
+
             if faktisk_sags_id == forventet_sags_id:
                 matchende_raekker.append(row)
 
@@ -613,6 +689,7 @@ async def _aabn_opfoelgningsformular(
                 "Flere synlige sager har det forventede SagsID. "
                 "Ingen sag vælges."
             )
+
         if matchende_raekker:
             break
 
@@ -628,10 +705,18 @@ async def _aabn_opfoelgningsformular(
     status = _normaliser_tekst(
         await row.get_attribute("data-tilstand") or ""
     ).casefold()
-    if status not in {"aktiv", "passiv"} or not (
-        (status == "aktiv" and aktive_sager)
-        or (status == "passiv" and passive_sager)
-    ):
+
+    if status == "aktiv" and not aktive_sager:
+        raise RuntimeError(
+            "Den fundne sag er aktiv, men aktive_sager=False."
+        )
+
+    if status == "passiv" and not passive_sager:
+        raise RuntimeError(
+            "Den fundne sag er passiv, men passive_sager=False."
+        )
+
+    if status not in {"aktiv", "passiv"}:
         raise RuntimeError(
             "Sagen har ukendt eller fravalgt status. "
             "Ingen sag vælges."
@@ -641,21 +726,29 @@ async def _aabn_opfoelgningsformular(
         await row.get_attribute("class") or ""
     ).split():
         valg_celle = row.locator("td.select-row")
+
         if await valg_celle.count() != 1:
             raise RuntimeError(
                 "Valgcellen på den forventede sag er ikke entydig."
             )
+
         await valg_celle.click(
-            timeout=min(ACTION_TIMEOUT_MS, timeout)
+            timeout=min(
+                ACTION_TIMEOUT_MS,
+                timeout,
+            )
         )
 
     elapsed_ms = 0
     while elapsed_ms < timeout:
         if (
-            _normaliser_tekst(await field.input_value()).casefold()
+            _normaliser_tekst(
+                await field.input_value()
+            ).casefold()
             == "1 sag valgt"
         ):
             break
+
         await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
     else:
@@ -663,24 +756,59 @@ async def _aabn_opfoelgningsformular(
             "Sagsvælgeren viste ikke '1 sag valgt'."
         )
 
-    # "Gå videre" er ikke det samme som "Godkend".
     videre = page.get_by_role(
         "button",
         name="Gå videre",
         exact=True,
     )
+
     if await videre.count() != 1 or not await videre.is_enabled():
         raise RuntimeError(
             "Gå videre-knappen er ikke entydig eller aktiv."
         )
+
     await videre.click(
-        timeout=min(ACTION_TIMEOUT_MS, timeout)
+        timeout=min(
+            ACTION_TIMEOUT_MS,
+            timeout,
+        )
     )
 
-    await _vent_paa_opgaveloader(page=page, timeout=timeout)
-    await formular.first.wait_for(
-        state="visible",
+    await _vent_paa_opgaveloader(
+        page=page,
         timeout=timeout,
+    )
+
+    elapsed_ms = 0
+    while elapsed_ms < timeout:
+        formular_er_aaben = (
+            await page.locator(
+                "form#opgaveForm:visible "
+                "select#opfoelgningsType:visible"
+            ).count() > 0
+            or await page.locator(
+                "form#opgaveForm:visible "
+                "button.submit-opgave"
+                "[data-href='/opgave/handling/fortsaet']:visible"
+            ).count() == 1
+            or await page.locator(
+                "form#opgaveForm:visible "
+                "button:visible span[accesskey='G']"
+            ).count() == 1
+        )
+
+        if formular_er_aaben:
+            logger.info(
+                "Sagen er valgt, og opfølgningsformularen er åbnet."
+            )
+            return
+
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+
+    raise PlaywrightTimeoutError(
+        "Sagen blev valgt, men opfølgningsformularen "
+        "blev ikke synlig inden timeout."
     )
 # SLUT: _aabn_opfoelgningsformular()
 
@@ -945,206 +1073,54 @@ def _valider_brugerdefinerede_input(
         )
 
 
-# START: _find_entydig_knap
-
-
 async def _find_entydig_knap(
     page: Page,
     text: str,
     timeout: int,
 ) -> Locator:
-    """Find præcis én synlig og aktiv handlingsknap med eksakt tekst.
+    """Find én synlig og aktiv submitknap med eksakt tekst."""
 
-    Funktionen understøtter blandt andet KY-knapper, hvor den synlige
-    tekst ligger i et underliggende span-element:
-
-        <button>
-            <span accesskey="G">
-                <span>G</span>odkend
-            </span>
-        </button>
-
-    Funktionen returnerer selve button- eller input-elementet, så den
-    kaldende funktion kan klikke på det korrekte interaktive element.
-    """
-    if page.is_closed():
-        raise RuntimeError(
-            f"KY-siden er lukket før knappen {text!r} kunne findes."
-        )
-
-    forventet_tekst = _normaliser_tekst(
-        text
-    )
-
-    if not forventet_tekst:
-        raise ValueError(
-            "Knappens tekst må ikke være tom."
-        )
-
-    pattern = re.compile(
-        rf"^\s*{re.escape(forventet_tekst)}\s*$",
-        re.IGNORECASE,
-    )
-
+    pattern = re.compile(rf"^\s*{re.escape(text)}\s*$", re.IGNORECASE)
     elapsed_ms = 0
 
     while elapsed_ms < timeout:
-        if page.is_closed():
-            raise RuntimeError(
-                f"KY-siden blev lukket, mens knappen "
-                f"{forventet_tekst!r} blev søgt."
-            )
-
-        # Første prioritet er KY's Godkend-knap i opgaveformularen.
-        # Der søges på accesskey-attributten, hvorefter det nærmeste
-        # button-element vælges.
-        accesskey_knapper = page.locator(
-            "#opgaveForm span[accesskey='G']"
-        ).locator(
-            "xpath=ancestor::button[1]"
+        candidates = page.locator(
+            "button[type='submit'], input[type='submit'], "
+            "button.btn-submit-form, a.btn-submit-form"
         )
-
-        # Generelt fallback til øvrige handlingsknapper.
-        generelle_knapper = page.locator(
-            "#opgaveForm button, "
-            "#opgaveForm input[type='submit'], "
-            "#opgaveForm input[type='button'], "
-            "#opgaveForm a.btn-submit-form, "
-            "button[type='submit'], "
-            "button[type='button'], "
-            "button.btn-submit-form, "
-            "input[type='submit'], "
-            "input[type='button'], "
-            "a.btn-submit-form"
-        )
-
         matches: list[Locator] = []
-        sete_elementer: set[str] = set()
 
-        for kandidatgruppe in (
-            accesskey_knapper,
-            generelle_knapper,
-        ):
-            kandidatantal = await kandidatgruppe.count()
-
-            for index in range(
-                kandidatantal
-            ):
-                candidate = kandidatgruppe.nth(
-                    index
-                )
-
-                try:
-                    if not await candidate.is_visible():
-                        continue
-
-                    if not await candidate.is_enabled():
-                        continue
-
-                    disabled = await candidate.get_attribute(
-                        "disabled"
-                    )
-
-                    if disabled is not None:
-                        continue
-
-                    aria_disabled = _normaliser_tekst(
-                        await candidate.get_attribute(
-                            "aria-disabled"
-                        )
-                        or ""
-                    ).casefold()
-
-                    if aria_disabled == "true":
-                        continue
-
-                    tag_name = await candidate.evaluate(
-                        "element => element.tagName.toLowerCase()"
-                    )
-
-                    if tag_name == "input":
-                        candidate_text = _normaliser_tekst(
-                            await candidate.get_attribute(
-                                "value"
-                            )
-                            or ""
-                        )
-                    else:
-                        candidate_text = _normaliser_tekst(
-                            await candidate.inner_text()
-                        )
-
-                    if not pattern.fullmatch(
-                        candidate_text
-                    ):
-                        continue
-
-                    # Undgå, at samme button findes både via
-                    # accesskey-selectoren og den generelle selector.
-                    element_key = await candidate.evaluate(
-                        """
-                        element => {
-                            if (!element.dataset.rpaButtonKey) {
-                                element.dataset.rpaButtonKey = (
-                                    "rpa-"
-                                    + Date.now().toString(36)
-                                    + "-"
-                                    + Math.random()
-                                        .toString(36)
-                                        .slice(2)
-                                );
-                            }
-
-                            return element.dataset.rpaButtonKey;
-                        }
-                        """
-                    )
-
-                    if element_key in sete_elementer:
-                        continue
-
-                    sete_elementer.add(
-                        element_key
-                    )
-
-                    matches.append(
-                        candidate
-                    )
-
-                except PlaywrightError:
-                    # KY kan udskifte knappen under DOM-opdateringen.
-                    # Næste pollingrunde læser den nye version.
+        for index in range(await candidates.count()):
+            candidate = candidates.nth(index)
+            try:
+                if not await candidate.is_visible():
                     continue
+                if not await candidate.is_enabled():
+                    continue
+                value = await candidate.get_attribute("value")
+                visible_text = _normaliser_tekst(
+                    value or await candidate.inner_text()
+                )
+                if pattern.fullmatch(visible_text):
+                    matches.append(candidate)
+            except Exception:
+                continue
 
         if len(matches) == 1:
-            logger.info(
-                "Fandt én synlig og aktiv knap med teksten %r.",
-                forventet_tekst,
-            )
-
             return matches[0]
-
         if len(matches) > 1:
             raise RuntimeError(
-                "Flere synlige og aktive knapper matcher teksten "
-                f"{forventet_tekst!r}. Antal={len(matches)}."
+                f"Flere aktive knapper matcher teksten {text!r}."
             )
 
-        await page.wait_for_timeout(
-            POLL_INTERVAL_MS
-        )
-
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
 
     raise PlaywrightTimeoutError(
-        f"Knappen {forventet_tekst!r} blev ikke fundet inden for "
-        f"{timeout / 1000:.0f} sekunder. "
-        "Der blev søgt efter både accesskey-knappen i #opgaveForm "
-        "og almindelige button/input-elementer."
+        f"Knappen {text!r} blev ikke fundet inden for "
+        f"{timeout / 1000:.0f} sekunder."
     )
 
-
-# SLUT: _find_entydig_knap
 
 async def _vent_paa_godkend_knap_vaek(
     page: Page,
