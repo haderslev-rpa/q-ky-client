@@ -2828,32 +2828,29 @@ class ValgtSag(TypedDict):
 
 
 # START: _modtag_post_hent_sags_id_fra_opgave
+
+
 async def _modtag_post_hent_sags_id_fra_opgave(
     page: Page,
     timeout: int,
 ) -> str:
-    """Læs det viste SagsID fra en åben Modtag post-opgave.
+    """Læs det viste SagsID fra den åbne Modtag post-opgave.
 
-    Nogle Modtag post-opgaver viser feltet:
+    Modtag post-opgaven er på dette tidspunkt åbnet via den URL,
+    som processen har hentet fra box-data.
 
-        input#sags[name='sags'][readonly]
+    SagsID-feltet kan eksempelvis indeholde:
 
-    med en værdi som:
+        [HTF-ZF1C9P]
 
-        [HTF-ZF6C9P]
-
-    Andre Modtag post-opgaver viser ikke feltet. Det gælder blandt
-    andet opgaver, hvor siden i stedet indeholder panelet
-    "Digital post oversigt".
-
-    Et manglende felt er derfor gyldigt og returneres som en tom
-    tekst. Den aktive HTF-sag findes senere i kontanthjælpsprocessen
-    via borgerens Sagsoversigt.
+    Hvis opgaven ikke indeholder et synligt SagsID-felt, returneres
+    en tom tekst. Den sag, processen efterfølgende skal vælge,
+    kommer fortsat fra argumentet ``sag`` til ``modtag_post()``.
     """
-
     if page.is_closed():
         raise RuntimeError(
-            "KY-siden er lukket før aflæsning af opgavens SagsID."
+            "KY-siden er lukket før aflæsning af "
+            "Modtag post-opgavens SagsID."
         )
 
     if not isinstance(timeout, int):
@@ -2877,15 +2874,15 @@ async def _modtag_post_hent_sags_id_fra_opgave(
         if page.is_closed():
             raise RuntimeError(
                 "KY-siden blev lukket under aflæsning "
-                "af opgavens SagsID."
+                "af Modtag post-opgavens SagsID."
             ) from error
 
         raise
 
     if antal_felter == 0:
         logger.info(
-            "Modtag post-opgaven indeholder ikke et SagsID-felt. "
-            "sags_id_fra_opgave returneres som tom tekst."
+            "Modtag post-opgaven indeholder ikke et "
+            "SagsID-felt. Fortsætter uden SagsID fra opgaven."
         )
 
         return ""
@@ -2905,7 +2902,7 @@ async def _modtag_post_hent_sags_id_fra_opgave(
             if page.is_closed():
                 raise RuntimeError(
                     "KY-siden blev lukket under aflæsning "
-                    "af opgavens SagsID."
+                    "af Modtag post-opgavens SagsID."
                 ) from error
 
             logger.debug(
@@ -2919,8 +2916,8 @@ async def _modtag_post_hent_sags_id_fra_opgave(
     if not synlige_felter:
         logger.info(
             "Modtag post-opgaven indeholder SagsID-feltet, "
-            "men intet SagsID-felt er synligt. "
-            "sags_id_fra_opgave returneres som tom tekst."
+            "men feltet er ikke synligt. Fortsætter uden "
+            "SagsID fra opgaven."
         )
 
         return ""
@@ -2947,7 +2944,7 @@ async def _modtag_post_hent_sags_id_fra_opgave(
         if page.is_closed():
             raise RuntimeError(
                 "KY-siden blev lukket under aflæsning "
-                "af opgavens SagsID."
+                "af Modtag post-opgavens SagsID."
             ) from error
 
         raise RuntimeError(
@@ -2958,18 +2955,19 @@ async def _modtag_post_hent_sags_id_fra_opgave(
     if not value:
         logger.info(
             "Modtag post-opgavens SagsID-felt er tomt. "
-            "sags_id_fra_opgave returneres som tom tekst."
+            "Fortsætter uden SagsID fra opgaven."
         )
 
         return ""
 
-    # Feltet vises normalt som:
+    # KY viser normalt SagsID med firkantede parenteser:
     #
     #     [HTF-ZF6C9P]
     #
-    # Fjern kun de omgivende firkantede parenteser.
+    # Regexen kræver en indledende og afsluttende firkantet
+    # parentes og returnerer kun teksten mellem parenteserne.
     match = re.fullmatch(
-        r"[\s*([^[]]+?)\s*]",
+        r"^\[\s*([^\[\]]+?)\s*\]$",
         value,
     )
 
@@ -2977,15 +2975,14 @@ async def _modtag_post_hent_sags_id_fra_opgave(
         sags_id = _modtag_post_normaliser_tekst(
             match.group(1)
         )
-
     else:
-        # Accepter også en værdi uden firkantede parenteser.
+        # Accepter også, at KY returnerer værdien uden parenteser.
         sags_id = value
 
     if not sags_id:
         logger.info(
             "Modtag post-opgavens SagsID kunne ikke udledes. "
-            "sags_id_fra_opgave returneres som tom tekst."
+            "Fortsætter uden SagsID fra opgaven."
         )
 
         return ""
@@ -2996,6 +2993,8 @@ async def _modtag_post_hent_sags_id_fra_opgave(
     )
 
     return sags_id
+
+
 # SLUT: _modtag_post_hent_sags_id_fra_opgave
 
 async def modtag_post_dokument(
