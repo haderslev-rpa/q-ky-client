@@ -268,7 +268,29 @@ async def opret_opfoelgningsopgave(
             timeout=timeout,
         )
         await godkend.scroll_into_view_if_needed()
+
+        # Klik først normalt. Hvis knappen fortsat står synligt efter en kort
+        # kontrol, udføres et fysisk museklik midt på selve button-elementet.
         await godkend.click(timeout=min(ACTION_TIMEOUT_MS, timeout))
+        await page.wait_for_timeout(1_500)
+
+        try:
+            stadig_synlig = await godkend.is_visible()
+        except Exception:
+            stadig_synlig = False
+
+        if stadig_synlig:
+            box = await godkend.bounding_box()
+            if box is None:
+                raise RuntimeError(
+                    "Godkend-knappen er synlig, men dens skærmposition "
+                    "kunne ikke bestemmes til musefallback."
+                )
+
+            await page.mouse.click(
+                box["x"] + box["width"] / 2,
+                box["y"] + box["height"] / 2,
+            )
 
         # Giv KY tid til at behandle handlingen og genopbygge DOM'en.
         await page.wait_for_timeout(GODKEND_STABILISERINGSVENTETID_MS)
@@ -541,10 +563,50 @@ async def _aabn_opfoelgningsformular(
         ".sagsvaelger-input[readonly]:visible"
     )
 
-    await inputs.first.wait_for(
-        state="visible",
-        timeout=timeout,
-    )
+    # Vent på enten den allerede åbne opfølgningsformular ELLER
+    # sagsvælgerens første trin. KY kan indlæse Godkend-knappen efter,
+    # at denne funktion er startet, så vi må ikke låse os fast på inputtet.
+    elapsed_ms = 0
+    while elapsed_ms < timeout:
+        formular_aaben_via_javascript = await page.evaluate(
+            """
+            () => {
+                const form = document.querySelector('#opgaveForm');
+                if (!form) return false;
+
+                const style = window.getComputedStyle(form);
+                const formVisible = (
+                    style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && form.getClientRects().length > 0
+                );
+                if (!formVisible) return false;
+
+                return Boolean(
+                    form.querySelector(
+                        'button.submit-opgave[data-href="/opgave/handling/fortsaet"]'
+                    )
+                    || form.querySelector('span[accesskey="G"]')
+                    || form.querySelector('select#opfoelgningsType')
+                    || form.querySelector('input#command\\.opfoelgningsdato')
+                );
+            }
+            """
+        )
+
+        if formular_aaben_via_javascript:
+            return
+
+        if await inputs.count() == 1 and await inputs.first.is_visible():
+            break
+
+        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        elapsed_ms += POLL_INTERVAL_MS
+    else:
+        raise PlaywrightTimeoutError(
+            "Hverken den åbne opfølgningsformular eller "
+            "sagsvælgerens første trin blev fundet inden timeout."
+        )
 
     if await inputs.count() != 1:
         raise RuntimeError(
@@ -1085,6 +1147,9 @@ async def _find_entydig_knap(
 
     while elapsed_ms < timeout:
         candidates = page.locator(
+            "#opgaveForm button.submit-opgave"
+            "[data-href='/opgave/handling/fortsaet'], "
+            "#opgaveForm button[type='button'], "
             "button[type='submit'], input[type='submit'], "
             "button.btn-submit-form, a.btn-submit-form"
         )
