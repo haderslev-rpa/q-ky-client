@@ -312,56 +312,147 @@ async def opret_opfoelgningsopgave(
 
     return resultat
 
+# START: _valider_checkpoint
+
 
 def _valider_checkpoint(
     checkpoint: OpfoelgningsopgaveCheckpoint | dict[str, Any],
 ) -> OpfoelgningsopgaveCheckpoint:
-    """Validér checkpointet fra ``opstart_opgave``."""
+    """Validér checkpointet fra ``opstart_opgave``.
 
+    En genoptaget opgave kan være åbnet på to sikre måder:
+
+    - via et eksakt match i tabellen Ubehandlede opgaver
+    - via en tidligere gemt og valideret checkpoint-URL
+
+    En ny opgave skal altid have kilden ``ny_opgave``.
+    """
     if not isinstance(checkpoint, dict):
-        raise TypeError("checkpoint skal være en dictionary.")
+        raise TypeError(
+            "checkpoint skal være en dictionary."
+        )
 
-    opgave_id = _normaliser_tekst(str(checkpoint.get("opgave_id") or ""))
+    opgave_id = _normaliser_tekst(
+        str(
+            checkpoint.get("opgave_id")
+            or ""
+        )
+    )
+
     opgave_navn = _normaliser_tekst(
-        str(checkpoint.get("opgave_navn") or "")
+        str(
+            checkpoint.get("opgave_navn")
+            or ""
+        )
     )
-    opgave_url = _normaliser_tekst(str(checkpoint.get("opgave_url") or ""))
-    borger_url = _normaliser_tekst(str(checkpoint.get("borger_url") or ""))
+
+    opgave_url = _normaliser_tekst(
+        str(
+            checkpoint.get("opgave_url")
+            or ""
+        )
+    )
+
+    borger_url = _normaliser_tekst(
+        str(
+            checkpoint.get("borger_url")
+            or ""
+        )
+    )
+
     menu_sti = tuple(
-        _normaliser_tekst(str(delnavn))
-        for delnavn in checkpoint.get("menu_sti", ())
-        if _normaliser_tekst(str(delnavn))
+        _normaliser_tekst(
+            str(delnavn)
+        )
+        for delnavn in checkpoint.get(
+            "menu_sti",
+            (),
+        )
+        if _normaliser_tekst(
+            str(delnavn)
+        )
     )
-    genoptaget = bool(checkpoint.get("genoptaget", False))
-    kilde = _normaliser_tekst(str(checkpoint.get("kilde") or ""))
+
+    genoptaget = bool(
+        checkpoint.get(
+            "genoptaget",
+            False,
+        )
+    )
+
+    kilde = _normaliser_tekst(
+        str(
+            checkpoint.get("kilde")
+            or ""
+        )
+    )
 
     if not opgave_id:
-        raise ValueError("Checkpointet mangler opgave_id.")
-    if not opgave_url:
-        raise ValueError("Checkpointet mangler opgave_url.")
-    if not borger_url:
-        raise ValueError("Checkpointet mangler borger_url.")
-    if opgave_navn.casefold() != FORVENTET_OPGAVENAVN.casefold():
         raise ValueError(
-            "Checkpointet tilhører ikke Opret opfølgningsopgave. "
-            f"Opgavenavn={opgave_navn!r}."
+            "Checkpointet mangler opgave_id."
         )
-    if tuple(delnavn.casefold() for delnavn in menu_sti) != tuple(
-        delnavn.casefold() for delnavn in FORVENTET_MENU_STI
+
+    if not opgave_url:
+        raise ValueError(
+            "Checkpointet mangler opgave_url."
+        )
+
+    if not borger_url:
+        raise ValueError(
+            "Checkpointet mangler borger_url."
+        )
+
+    if (
+        opgave_navn.casefold()
+        != FORVENTET_OPGAVENAVN.casefold()
     ):
         raise ValueError(
-            "Checkpointets menu_sti matcher ikke Opret opfølgningsopgave. "
+            "Checkpointet tilhører ikke "
+            "Opret opfølgningsopgave. "
+            f"Opgavenavn={opgave_navn!r}."
+        )
+
+    forventet_menu_sti = tuple(
+        delnavn.casefold()
+        for delnavn in FORVENTET_MENU_STI
+    )
+
+    faktisk_menu_sti = tuple(
+        delnavn.casefold()
+        for delnavn in menu_sti
+    )
+
+    if faktisk_menu_sti != forventet_menu_sti:
+        raise ValueError(
+            "Checkpointets menu_sti matcher ikke "
+            "Opret opfølgningsopgave. "
             f"menu_sti={menu_sti!r}."
         )
 
     if not kilde:
-        kilde = "ubehandlede_opgaver" if genoptaget else "ny_opgave"
+        kilde = (
+            "ubehandlede_opgaver"
+            if genoptaget
+            else "ny_opgave"
+        )
 
-    expected_source = "ubehandlede_opgaver" if genoptaget else "ny_opgave"
-    if kilde != expected_source:
+    if genoptaget:
+        tilladte_kilder = {
+            "ubehandlede_opgaver",
+            "gemt_checkpoint_url",
+        }
+    else:
+        tilladte_kilder = {
+            "ny_opgave",
+        }
+
+    if kilde not in tilladte_kilder:
         raise ValueError(
-            "Checkpointets genoptaget-flag og kilde er inkonsistente. "
-            f"genoptaget={genoptaget}, kilde={kilde!r}."
+            "Checkpointets genoptaget-flag og kilde er "
+            "inkonsistente. "
+            f"genoptaget={genoptaget}, "
+            f"kilde={kilde!r}, "
+            f"tilladte_kilder={sorted(tilladte_kilder)!r}."
         )
 
     return {
@@ -374,6 +465,8 @@ def _valider_checkpoint(
         "kilde": kilde,
     }
 
+
+# SLUT: _valider_checkpoint
 
 # START: Erstat _aabn_opfoelgningsformular() i
 # ky_client/functionality/opfoelgningsopgave.py
