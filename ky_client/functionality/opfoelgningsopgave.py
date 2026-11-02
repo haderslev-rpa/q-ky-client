@@ -945,54 +945,206 @@ def _valider_brugerdefinerede_input(
         )
 
 
+# START: _find_entydig_knap
+
+
 async def _find_entydig_knap(
     page: Page,
     text: str,
     timeout: int,
 ) -> Locator:
-    """Find én synlig og aktiv submitknap med eksakt tekst."""
+    """Find præcis én synlig og aktiv handlingsknap med eksakt tekst.
 
-    pattern = re.compile(rf"^\s*{re.escape(text)}\s*$", re.IGNORECASE)
+    Funktionen understøtter blandt andet KY-knapper, hvor den synlige
+    tekst ligger i et underliggende span-element:
+
+        <button>
+            <span accesskey="G">
+                <span>G</span>odkend
+            </span>
+        </button>
+
+    Funktionen returnerer selve button- eller input-elementet, så den
+    kaldende funktion kan klikke på det korrekte interaktive element.
+    """
+    if page.is_closed():
+        raise RuntimeError(
+            f"KY-siden er lukket før knappen {text!r} kunne findes."
+        )
+
+    forventet_tekst = _normaliser_tekst(
+        text
+    )
+
+    if not forventet_tekst:
+        raise ValueError(
+            "Knappens tekst må ikke være tom."
+        )
+
+    pattern = re.compile(
+        rf"^\s*{re.escape(forventet_tekst)}\s*$",
+        re.IGNORECASE,
+    )
+
     elapsed_ms = 0
 
     while elapsed_ms < timeout:
-        candidates = page.locator(
-            "button[type='submit'], input[type='submit'], "
-            "button.btn-submit-form, a.btn-submit-form"
-        )
-        matches: list[Locator] = []
-
-        for index in range(await candidates.count()):
-            candidate = candidates.nth(index)
-            try:
-                if not await candidate.is_visible():
-                    continue
-                if not await candidate.is_enabled():
-                    continue
-                value = await candidate.get_attribute("value")
-                visible_text = _normaliser_tekst(
-                    value or await candidate.inner_text()
-                )
-                if pattern.fullmatch(visible_text):
-                    matches.append(candidate)
-            except Exception:
-                continue
-
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
+        if page.is_closed():
             raise RuntimeError(
-                f"Flere aktive knapper matcher teksten {text!r}."
+                f"KY-siden blev lukket, mens knappen "
+                f"{forventet_tekst!r} blev søgt."
             )
 
-        await page.wait_for_timeout(POLL_INTERVAL_MS)
+        # Første prioritet er KY's Godkend-knap i opgaveformularen.
+        # Der søges på accesskey-attributten, hvorefter det nærmeste
+        # button-element vælges.
+        accesskey_knapper = page.locator(
+            "#opgaveForm span[accesskey='G']"
+        ).locator(
+            "xpath=ancestor::button[1]"
+        )
+
+        # Generelt fallback til øvrige handlingsknapper.
+        generelle_knapper = page.locator(
+            "#opgaveForm button, "
+            "#opgaveForm input[type='submit'], "
+            "#opgaveForm input[type='button'], "
+            "#opgaveForm a.btn-submit-form, "
+            "button[type='submit'], "
+            "button[type='button'], "
+            "button.btn-submit-form, "
+            "input[type='submit'], "
+            "input[type='button'], "
+            "a.btn-submit-form"
+        )
+
+        matches: list[Locator] = []
+        sete_elementer: set[str] = set()
+
+        for kandidatgruppe in (
+            accesskey_knapper,
+            generelle_knapper,
+        ):
+            kandidatantal = await kandidatgruppe.count()
+
+            for index in range(
+                kandidatantal
+            ):
+                candidate = kandidatgruppe.nth(
+                    index
+                )
+
+                try:
+                    if not await candidate.is_visible():
+                        continue
+
+                    if not await candidate.is_enabled():
+                        continue
+
+                    disabled = await candidate.get_attribute(
+                        "disabled"
+                    )
+
+                    if disabled is not None:
+                        continue
+
+                    aria_disabled = _normaliser_tekst(
+                        await candidate.get_attribute(
+                            "aria-disabled"
+                        )
+                        or ""
+                    ).casefold()
+
+                    if aria_disabled == "true":
+                        continue
+
+                    tag_name = await candidate.evaluate(
+                        "element => element.tagName.toLowerCase()"
+                    )
+
+                    if tag_name == "input":
+                        candidate_text = _normaliser_tekst(
+                            await candidate.get_attribute(
+                                "value"
+                            )
+                            or ""
+                        )
+                    else:
+                        candidate_text = _normaliser_tekst(
+                            await candidate.inner_text()
+                        )
+
+                    if not pattern.fullmatch(
+                        candidate_text
+                    ):
+                        continue
+
+                    # Undgå, at samme button findes både via
+                    # accesskey-selectoren og den generelle selector.
+                    element_key = await candidate.evaluate(
+                        """
+                        element => {
+                            if (!element.dataset.rpaButtonKey) {
+                                element.dataset.rpaButtonKey = (
+                                    "rpa-"
+                                    + Date.now().toString(36)
+                                    + "-"
+                                    + Math.random()
+                                        .toString(36)
+                                        .slice(2)
+                                );
+                            }
+
+                            return element.dataset.rpaButtonKey;
+                        }
+                        """
+                    )
+
+                    if element_key in sete_elementer:
+                        continue
+
+                    sete_elementer.add(
+                        element_key
+                    )
+
+                    matches.append(
+                        candidate
+                    )
+
+                except PlaywrightError:
+                    # KY kan udskifte knappen under DOM-opdateringen.
+                    # Næste pollingrunde læser den nye version.
+                    continue
+
+        if len(matches) == 1:
+            logger.info(
+                "Fandt én synlig og aktiv knap med teksten %r.",
+                forventet_tekst,
+            )
+
+            return matches[0]
+
+        if len(matches) > 1:
+            raise RuntimeError(
+                "Flere synlige og aktive knapper matcher teksten "
+                f"{forventet_tekst!r}. Antal={len(matches)}."
+            )
+
+        await page.wait_for_timeout(
+            POLL_INTERVAL_MS
+        )
+
         elapsed_ms += POLL_INTERVAL_MS
 
     raise PlaywrightTimeoutError(
-        f"Knappen {text!r} blev ikke fundet inden for "
-        f"{timeout / 1000:.0f} sekunder."
+        f"Knappen {forventet_tekst!r} blev ikke fundet inden for "
+        f"{timeout / 1000:.0f} sekunder. "
+        "Der blev søgt efter både accesskey-knappen i #opgaveForm "
+        "og almindelige button/input-elementer."
     )
 
+
+# SLUT: _find_entydig_knap
 
 async def _vent_paa_godkend_knap_vaek(
     page: Page,
