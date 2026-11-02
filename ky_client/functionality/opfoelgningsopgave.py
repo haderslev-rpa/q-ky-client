@@ -490,22 +490,22 @@ async def _aabn_opfoelgningsformular(
         )
 
     opgaveformular = page.locator(
-        "form#opgaveForm:visible"
+        "#opgaveForm:visible"
     )
 
     godkend_knap = page.locator(
-        "form#opgaveForm:visible "
+        "#opgaveForm:visible "
         "button.submit-opgave"
         "[data-href='/opgave/handling/fortsaet']:visible"
     )
 
     godkend_accesskey = page.locator(
-        "form#opgaveForm:visible "
+        "#opgaveForm:visible "
         "button:visible span[accesskey='G']"
     )
 
     opfoelgningstype = page.locator(
-        "form#opgaveForm:visible "
+        "#opgaveForm:visible "
         "select#opfoelgningsType:visible"
     )
 
@@ -783,16 +783,16 @@ async def _aabn_opfoelgningsformular(
     while elapsed_ms < timeout:
         formular_er_aaben = (
             await page.locator(
-                "form#opgaveForm:visible "
+                "#opgaveForm:visible "
                 "select#opfoelgningsType:visible"
             ).count() > 0
             or await page.locator(
-                "form#opgaveForm:visible "
+                "#opgaveForm:visible "
                 "button.submit-opgave"
                 "[data-href='/opgave/handling/fortsaet']:visible"
             ).count() == 1
             or await page.locator(
-                "form#opgaveForm:visible "
+                "#opgaveForm:visible "
                 "button:visible span[accesskey='G']"
             ).count() == 1
         )
