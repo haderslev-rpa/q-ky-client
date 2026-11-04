@@ -2827,25 +2827,31 @@ class ValgtSag(TypedDict):
     sagstekst: str
 
 
+
+
 # START: _modtag_post_hent_sags_id_fra_opgave
-
-
 async def _modtag_post_hent_sags_id_fra_opgave(
     page: Page,
     timeout: int,
 ) -> str:
-    """Læs det viste SagsID fra den åbne Modtag post-opgave.
+    """Læs HTF-sagsnøglen fra den åbne Modtag post-opgave.
 
-    Modtag post-opgaven er på dette tidspunkt åbnet via den URL,
-    som processen har hentet fra box-data.
+    KY-feltet kan eksempelvis se sådan ud:
 
-    SagsID-feltet kan eksempelvis indeholde:
+        <input
+            id="sags"
+            name="sags"
+            readonly="readonly"
+            value="[HTF-NKO9ZL]"
+        >
 
-        [HTF-ZF1C9P]
+    Funktionen returnerer værdien uden firkantede parenteser:
 
-    Hvis opgaven ikke indeholder et synligt SagsID-felt, returneres
-    en tom tekst. Den sag, processen efterfølgende skal vælge,
-    kommer fortsat fra argumentet ``sag`` til ``modtag_post()``.
+        HTF-NKO9ZL
+
+    Et tomt felt returneres som tom tekst. Hvis der findes flere synlige
+    felter, eller hvis et udfyldt felt ikke indeholder én gyldig
+    HTF-sagsnøgle, stoppes processen.
     """
     if page.is_closed():
         raise RuntimeError(
@@ -2863,139 +2869,194 @@ async def _modtag_post_hent_sags_id_fra_opgave(
             "timeout skal være større end 0."
         )
 
-    sagsfelter = page.locator(
-        KYSelectors.Borgere.MODTAG_POST_SAGSID
-    )
+    elapsed_ms = 0
+    stable_checks = 0
+    required_stable_checks = 2
+    previous_value: str | None = None
+    latest_diagnostic: list[dict[str, Any]] = []
 
-    try:
-        antal_felter = await sagsfelter.count()
-
-    except PlaywrightError as error:
+    while elapsed_ms < timeout:
         if page.is_closed():
             raise RuntimeError(
-                "KY-siden blev lukket under aflæsning "
-                "af Modtag post-opgavens SagsID."
-            ) from error
-
-        raise
-
-    if antal_felter == 0:
-        logger.info(
-            "Modtag post-opgaven indeholder ikke et "
-            "SagsID-felt. Fortsætter uden SagsID fra opgaven."
-        )
-
-        return ""
-
-    synlige_felter: list[Locator] = []
-
-    for index in range(antal_felter):
-        felt = sagsfelter.nth(index)
-
-        try:
-            if await felt.is_visible():
-                synlige_felter.append(
-                    felt
-                )
-
-        except PlaywrightError as error:
-            if page.is_closed():
-                raise RuntimeError(
-                    "KY-siden blev lukket under aflæsning "
-                    "af Modtag post-opgavens SagsID."
-                ) from error
-
-            logger.debug(
-                "Et SagsID-felt kunne ikke undersøges. "
-                "Indeks=%d, fejltype=%s, fejl=%s.",
-                index,
-                type(error).__name__,
-                error,
+                "KY-siden blev lukket under aflæsning af "
+                "Modtag post-opgavens SagsID."
             )
 
-    if not synlige_felter:
-        logger.info(
-            "Modtag post-opgaven indeholder SagsID-feltet, "
-            "men feltet er ikke synligt. Fortsætter uden "
-            "SagsID fra opgaven."
-        )
+        visible_fields: list[Locator] = []
+        diagnostic: list[dict[str, Any]] = []
 
-        return ""
-
-    if len(synlige_felter) > 1:
-        raise RuntimeError(
-            "Modtag post-opgaven indeholder flere synlige "
-            "SagsID-felter. SagsID kan ikke aflæses entydigt."
-        )
-
-    felt = synlige_felter[0]
-
-    try:
-        value = _modtag_post_normaliser_tekst(
-            await felt.input_value(
-                timeout=min(
-                    ACTION_TIMEOUT_MS,
-                    timeout,
+        for frame in page.frames:
+            try:
+                fields = frame.locator(
+                    KYSelectors.Borgere.MODTAG_POST_SAGSID
                 )
-            )
-        )
+                field_count = await fields.count()
 
-    except PlaywrightError as error:
-        if page.is_closed():
+                frame_diagnostic: dict[str, Any] = {
+                    "frame": frame.url,
+                    "antal_felter": field_count,
+                }
+                diagnostic.append(frame_diagnostic)
+
+                for index in range(field_count):
+                    field = fields.nth(index)
+
+                    try:
+                        if not await field.is_visible():
+                            continue
+
+                        visible_fields.append(field)
+                        frame_diagnostic["synligt_felt"] = True
+                    except PlaywrightError as error:
+                        frame_diagnostic["feltfejl"] = (
+                            f"{type(error).__name__}: {error}"
+                        )
+            except PlaywrightError as error:
+                diagnostic.append(
+                    {
+                        "frame": frame.url,
+                        "fejl": (
+                            f"{type(error).__name__}: {error}"
+                        ),
+                    }
+                )
+
+        latest_diagnostic = diagnostic
+
+        if len(visible_fields) > 1:
             raise RuntimeError(
-                "KY-siden blev lukket under aflæsning "
-                "af Modtag post-opgavens SagsID."
-            ) from error
+                "Modtag post-opgaven indeholder flere synlige "
+                "SagsID-felter. SagsID kan derfor ikke aflæses "
+                "entydigt. "
+                f"Antal synlige felter={len(visible_fields)}, "
+                f"diagnose={diagnostic!r}."
+            )
 
-        raise RuntimeError(
-            "Modtag post-opgavens synlige SagsID-felt "
-            "kunne ikke aflæses."
-        ) from error
+        if len(visible_fields) == 1:
+            field = visible_fields[0]
 
-    if not value:
-        logger.info(
-            "Modtag post-opgavens SagsID-felt er tomt. "
-            "Fortsætter uden SagsID fra opgaven."
+            try:
+                raw_value = await field.input_value(
+                    timeout=min(
+                        ACTION_TIMEOUT_MS,
+                        max(
+                            POLL_INTERVAL_MS,
+                            timeout - elapsed_ms,
+                        ),
+                    )
+                )
+            except PlaywrightError as error:
+                if page.is_closed():
+                    raise RuntimeError(
+                        "KY-siden blev lukket under aflæsning af "
+                        "Modtag post-opgavens SagsID."
+                    ) from error
+
+                logger.debug(
+                    "Modtag post-opgavens SagsID-felt kunne "
+                    "ikke aflæses endnu. Fejltype=%s, fejl=%s.",
+                    type(error).__name__,
+                    error,
+                )
+
+                raw_value = ""
+
+            normalized_value = (
+                _modtag_post_normaliser_tekst(
+                    raw_value
+                )
+            )
+
+            if normalized_value:
+                if normalized_value == previous_value:
+                    stable_checks += 1
+                else:
+                    previous_value = normalized_value
+                    stable_checks = 1
+
+                if stable_checks >= required_stable_checks:
+                    # KY viser normalt sagsnøglen med parenteser:
+                    #
+                    #     [HTF-NKO9ZL]
+                    #
+                    # Accepter også værdien uden parenteser.
+                    bracket_match = re.fullmatch(
+                        r"\[\s*([^\[\]]+?)\s*\]",
+                        normalized_value,
+                    )
+
+                    if bracket_match is not None:
+                        sags_id = (
+                            _modtag_post_normaliser_tekst(
+                                bracket_match.group(1)
+                            )
+                        )
+                    else:
+                        sags_id = normalized_value
+
+                    if not sags_id:
+                        raise RuntimeError(
+                            "Modtag post-opgavens SagsID-felt "
+                            "var udfyldt, men indeholdt ingen "
+                            "læsbar sagsnøgle."
+                        )
+
+                    # Kontanthjælpsprocessen arbejder med HTF-sager.
+                    # Eksempler:
+                    #
+                    #     HTF-NKO9ZL
+                    #     HTF-ZF1C9P
+                    if re.fullmatch(
+                        r"HTF-[A-Z0-9]+",
+                        sags_id,
+                        flags=re.IGNORECASE,
+                    ) is None:
+                        raise RuntimeError(
+                            "Modtag post-opgavens SagsID-felt "
+                            "indeholder ikke en gyldig "
+                            "HTF-sagsnøgle. "
+                            f"Fundet værdi={sags_id!r}."
+                        )
+
+                    sags_id = sags_id.upper()
+
+                    logger.info(
+                        "Modtag post: SagsID blev aflæst direkte "
+                        "fra den åbne opgave. SagsID=%r.",
+                        sags_id,
+                    )
+
+                    return sags_id
+            else:
+                stable_checks = 0
+                previous_value = None
+        else:
+            stable_checks = 0
+            previous_value = None
+
+        if elapsed_ms % 2_000 == 0:
+            logger.info(
+                "Venter på Modtag post-opgavens SagsID-felt. "
+                "Diagnose=%s.",
+                diagnostic,
+            )
+
+        await page.wait_for_timeout(
+            POLL_INTERVAL_MS
         )
-
-        return ""
-
-    # KY viser normalt SagsID med firkantede parenteser:
-    #
-    #     [HTF-ZF6C9P]
-    #
-    # Regexen kræver en indledende og afsluttende firkantet
-    # parentes og returnerer kun teksten mellem parenteserne.
-    match = re.fullmatch(
-        r"^\[\s*([^\[\]]+?)\s*\]$",
-        value,
-    )
-
-    if match is not None:
-        sags_id = _modtag_post_normaliser_tekst(
-            match.group(1)
-        )
-    else:
-        # Accepter også, at KY returnerer værdien uden parenteser.
-        sags_id = value
-
-    if not sags_id:
-        logger.info(
-            "Modtag post-opgavens SagsID kunne ikke udledes. "
-            "Fortsætter uden SagsID fra opgaven."
-        )
-
-        return ""
+        elapsed_ms += POLL_INTERVAL_MS
 
     logger.info(
-        "Modtag post: SagsID fra opgaven er aflæst som %r.",
-        sags_id,
+        "Modtag post-opgaven havde ikke et stabilt udfyldt "
+        "SagsID-felt inden for %.0f sekunder. "
+        "Fortsætter uden SagsID fra opgaven. Diagnose=%s.",
+        timeout / 1_000,
+        latest_diagnostic,
     )
 
-    return sags_id
-
-
+    return ""
 # SLUT: _modtag_post_hent_sags_id_fra_opgave
+
 
 async def modtag_post_dokument(
     page: Page,
@@ -3041,6 +3102,7 @@ async def modtag_post_dokument(
     return dokument_resultat
 
 
+# START: modtag_post
 async def modtag_post(
     page: Page,
     opgave_url: str,
@@ -3052,24 +3114,21 @@ async def modtag_post(
     godkend: bool = False,
     timeout: int = OPGAVE_TIMEOUT_MS,
 ) -> ModtagPostResultat:
-    """Behandl valgte dele af en Modtag post-opgave i ét samlet kald.
+    """Behandl valgte dele af en Modtag post-opgave.
 
-    Funktionen navigerer altid til ``opgave_url`` og bekræfter, at den åbne
-    opgave er Modtag post eller Modtaget post.
+    Funktionen navigerer altid til ``opgave_url`` og bekræfter, at den
+    åbne opgave er Modtag post eller Modtaget post.
 
-    Valgfri handlinger styres af inputtene:
+    Valg af sag sker i denne prioriterede rækkefølge:
 
-    * ``dokument`` tomt eller ``None``:
-      Dokumenter-panelet berøres ikke.
-    * ``dokument`` udfyldt:
-      Dokumentet findes, og åbnes kun når ``aaben_dokument=True``.
-    * ``sag`` udfyldt:
-      Sagen vælges, også selv om ``godkend=False``.
-    * ``godkend=True``:
-      Godkend klikkes først efter en sag er valgt eller sikkert valideret.
+    1. SagsID aflæst direkte fra den åbne Modtag post-opgaves
+       readonly-felt ``input#sags``.
+    2. Argumentet ``sag`` som fallback, hvis opgavens felt er tomt.
 
-    Dermed bruges den samme offentlige funktion til læsning, sagsvalg og
-    permanent godkendelse. Selectors ligger i ``KYSelectors.Borgere``.
+    Hvis både opgaven og argumentet indeholder en sag, og værdierne er
+    forskellige, bruges opgavens sag. Forskellen logges tydeligt.
+
+    Godkend udføres først, når den effektive sag er valgt og verificeret.
     """
     _modtag_post_valider_input(
         page=page,
@@ -3084,15 +3143,21 @@ async def modtag_post(
     )
 
     opgave_url = opgave_url.strip()
-    dokument = _modtag_post_normaliser_tekst(dokument)
-    sag = _modtag_post_normaliser_tekst(sag)
+
+    dokument = _modtag_post_normaliser_tekst(
+        dokument
+    )
+
+    sag_fra_argument = _modtag_post_normaliser_tekst(
+        sag
+    )
 
     logger.info(
-        "Starter Modtag post. Dokument=%r, åbn dokument=%s, sag=%r, "
-        "aktive=%s, passive=%s, godkend=%s.",
+        "Starter Modtag post. Dokument=%r, åbn dokument=%s, "
+        "sag fra argument=%r, aktive=%s, passive=%s, godkend=%s.",
         dokument or None,
         aaben_dokument,
-        sag or None,
+        sag_fra_argument or None,
         aktive_sager,
         passive_sager,
         godkend,
@@ -3103,14 +3168,55 @@ async def modtag_post(
         opgave_url=opgave_url,
         timeout=timeout,
     )
+
     await _modtag_post_bekraeft_opgave(
         page=page,
         timeout=timeout,
     )
 
-    sags_id_fra_opgave = await _modtag_post_hent_sags_id_fra_opgave(
-        page=page,
-        timeout=timeout,
+    # SagsID læses direkte fra den åbne Modtag post-opgave,
+    # før Dokumenter-panelet eller sagsvælgeren åbnes.
+    sags_id_fra_opgave = (
+        await _modtag_post_hent_sags_id_fra_opgave(
+            page=page,
+            timeout=timeout,
+        )
+    )
+
+    # Opgavens egen sagsnøgle har første prioritet.
+    effektiv_sag = (
+        sags_id_fra_opgave
+        or sag_fra_argument
+    )
+
+    if (
+        sags_id_fra_opgave
+        and sag_fra_argument
+        and (
+            sags_id_fra_opgave.casefold()
+            != sag_fra_argument.casefold()
+        )
+    ):
+        logger.warning(
+            "Modtag post-opgavens SagsID matcher ikke den sag, "
+            "som den kaldende proces sendte med. Opgavens SagsID "
+            "har første prioritet. Sag fra opgave=%r, "
+            "sag fra argument=%r.",
+            sags_id_fra_opgave,
+            sag_fra_argument,
+        )
+
+    if sags_id_fra_opgave:
+        sag_kilde = "modtag_post_opgave"
+    elif sag_fra_argument:
+        sag_kilde = "argument"
+    else:
+        sag_kilde = ""
+
+    logger.info(
+        "Modtag post: effektiv sag=%r, kilde=%r.",
+        effektiv_sag or None,
+        sag_kilde or None,
     )
 
     resultat: ModtagPostResultat = {
@@ -3123,7 +3229,7 @@ async def modtag_post(
         "dokument_url": "",
         "aabnet_url": "",
         "sags_id_fra_opgave": sags_id_fra_opgave,
-        "sag": sag,
+        "sag": effektiv_sag,
         "sag_behandlet": False,
         "sag_id": "",
         "sagstekst": "",
@@ -3135,13 +3241,19 @@ async def modtag_post(
     }
 
     if dokument:
-        dokument_resultat = await _modtag_post_behandl_dokument(
-            page=page,
-            dokument=dokument,
-            aaben_dokument=aaben_dokument,
-            timeout=timeout,
+        dokument_resultat = (
+            await _modtag_post_behandl_dokument(
+                page=page,
+                dokument=dokument,
+                aaben_dokument=aaben_dokument,
+                timeout=timeout,
+            )
         )
-        resultat.update(dokument_resultat)
+
+        resultat.update(
+            dokument_resultat
+        )
+
         resultat["dokument_behandlet"] = True
     else:
         logger.info(
@@ -3149,48 +3261,67 @@ async def modtag_post(
             "Dokumenter-panelet springes over."
         )
 
-    if sag:
+    if effektiv_sag:
         valgt_sag = await _modtag_post_vaelg_sag(
             page=page,
-            sag=sag,
+            sag=effektiv_sag,
             aktive_sager=aktive_sager,
             passive_sager=passive_sager,
             timeout=timeout,
         )
+
         resultat["sag_behandlet"] = True
         resultat["sag_id"] = valgt_sag["sag_id"]
         resultat["sagstekst"] = valgt_sag["sagstekst"]
         resultat["sag_valgt"] = True
     else:
         logger.info(
-            "Intet sagssøgekriterium er angivet. Sagsvælgeren springes over."
+            "Hverken Modtag post-opgaven eller argumentet "
+            "indeholder et sagssøgekriterium. "
+            "Sagsvælgeren springes over."
         )
 
     if godkend:
+        if not effektiv_sag:
+            raise RuntimeError(
+                "Modtag post-opgaven må ikke godkendes, fordi "
+                "der hverken kunne aflæses en sag fra opgaven "
+                "eller bruges en sag fra argumentet."
+            )
+
         if not resultat["sag_valgt"]:
             raise RuntimeError(
-                "Modtag post-opgaven må ikke godkendes, før en sag er "
-                "valgt og verificeret."
+                "Modtag post-opgaven må ikke godkendes, før "
+                "sagen er valgt og verificeret."
             )
+
         await _modtag_post_godkend_opgave(
             page=page,
             timeout=timeout,
         )
+
         resultat["godkendt"] = True
     else:
-        logger.info("Modtag post-opgaven godkendes ikke.")
+        logger.info(
+            "Modtag post-opgaven godkendes ikke."
+        )
 
     logger.info(
-        "Modtag post afsluttet. Dokument behandlet=%s, fundet=%s, "
-        "dokument åbnet=%s, sag valgt=%s, godkendt=%s.",
+        "Modtag post afsluttet. Dokument behandlet=%s, "
+        "fundet=%s, dokument åbnet=%s, "
+        "SagsID fra opgave=%r, effektiv sag=%r, "
+        "sag valgt=%s, godkendt=%s.",
         resultat["dokument_behandlet"],
         resultat["fundet"],
         resultat["dokument_aabnet"],
+        resultat["sags_id_fra_opgave"],
+        resultat["sag"],
         resultat["sag_valgt"],
         resultat["godkendt"],
     )
-    return resultat
 
+    return resultat
+# SLUT: modtag_post
 
 async def _modtag_post_naviger_til_opgave(
     page: Page,
@@ -4432,6 +4563,7 @@ async def _modtag_post_vent_paa_godkendelse_behandlet(
     )
 
 
+# START: _modtag_post_valider_input
 def _modtag_post_valider_input(
     page: Page,
     opgave_url: str,
@@ -4443,53 +4575,117 @@ def _modtag_post_valider_input(
     godkend: bool,
     timeout: int,
 ) -> None:
-    """Validér input og kombinationer før browserhandlinger udføres."""
+    """Validér input før Modtag post-browserhandlingerne.
+
+    ``sag`` må være None, selv når ``godkend=True``, fordi sagen kan
+    aflæses direkte fra den åbne Modtag post-opgaves SagsID-felt.
+
+    Efter navigationen kontrollerer ``modtag_post()``, at der findes en
+    effektiv sag, før sagsvalg og godkendelse gennemføres.
+    """
     if not isinstance(page, Page):
-        raise TypeError("page skal være en async Playwright Page.")
+        raise TypeError(
+            "page skal være en async Playwright Page."
+        )
+
     if not isinstance(opgave_url, str):
-        raise TypeError("opgave_url skal være en tekststreng.")
-    if dokument is not None and not isinstance(dokument, str):
-        raise TypeError("dokument skal være en tekststreng eller None.")
+        raise TypeError(
+            "opgave_url skal være en tekststreng."
+        )
+
+    if dokument is not None and not isinstance(
+        dokument,
+        str,
+    ):
+        raise TypeError(
+            "dokument skal være en tekststreng eller None."
+        )
+
     if not isinstance(aaben_dokument, bool):
-        raise TypeError("aaben_dokument skal være True eller False.")
-    if sag is not None and not isinstance(sag, str):
-        raise TypeError("sag skal være en tekststreng eller None.")
+        raise TypeError(
+            "aaben_dokument skal være True eller False."
+        )
+
+    if sag is not None and not isinstance(
+        sag,
+        str,
+    ):
+        raise TypeError(
+            "sag skal være en tekststreng eller None."
+        )
+
     if not isinstance(aktive_sager, bool):
-        raise TypeError("aktive_sager skal være True eller False.")
+        raise TypeError(
+            "aktive_sager skal være True eller False."
+        )
+
     if not isinstance(passive_sager, bool):
-        raise TypeError("passive_sager skal være True eller False.")
+        raise TypeError(
+            "passive_sager skal være True eller False."
+        )
+
     if not isinstance(godkend, bool):
-        raise TypeError("godkend skal være True eller False.")
+        raise TypeError(
+            "godkend skal være True eller False."
+        )
+
     if not isinstance(timeout, int):
-        raise TypeError("timeout skal være et heltal i millisekunder.")
+        raise TypeError(
+            "timeout skal være et heltal i millisekunder."
+        )
+
     if timeout <= 0:
-        raise ValueError("timeout skal være større end 0.")
+        raise ValueError(
+            "timeout skal være større end 0."
+        )
+
     if not opgave_url.strip():
-        raise ValueError("opgave_url må ikke være tom.")
+        raise ValueError(
+            "opgave_url må ikke være tom."
+        )
+
     if re.match(
         r"^https?://",
         opgave_url.strip(),
         re.IGNORECASE,
     ) is None:
-        raise ValueError("opgave_url skal være en absolut HTTP(S)-URL.")
-    if aaben_dokument and not _modtag_post_normaliser_tekst(dokument):
         raise ValueError(
-            "dokument skal være udfyldt, når aaben_dokument=True."
+            "opgave_url skal være en absolut HTTP(S)-URL."
         )
-    if godkend and not _modtag_post_normaliser_tekst(sag):
-        raise ValueError("sag skal være udfyldt, når godkend=True.")
+
     if (
-        _modtag_post_normaliser_tekst(sag)
-        and not aktive_sager
-        and not passive_sager
+        aaben_dokument
+        and not _modtag_post_normaliser_tekst(
+            dokument
+        )
     ):
         raise ValueError(
-            "Mindst én af aktive_sager eller passive_sager skal være True, "
-            "når en sag skal vælges."
+            "dokument skal være udfyldt, når "
+            "aaben_dokument=True."
         )
-    if page.is_closed():
-        raise RuntimeError("KY-siden er lukket før navigationen.")
 
+    # Der skal være mindst én sagstype tilgængelig, hvis processen
+    # skal vælge en sag. Det gælder også, når søgekriteriet først
+    # aflæses fra Modtag post-opgaven efter navigationen.
+    if (
+        not aktive_sager
+        and not passive_sager
+        and (
+            godkend
+            or _modtag_post_normaliser_tekst(sag)
+        )
+    ):
+        raise ValueError(
+            "Mindst én af aktive_sager eller passive_sager "
+            "skal være True, når en sag skal vælges eller "
+            "opgaven skal godkendes."
+        )
+
+    if page.is_closed():
+        raise RuntimeError(
+            "KY-siden er lukket før navigationen."
+        )
+# SLUT: _modtag_post_valider_input
 
 def _modtag_post_sag_matcher(
     sag: str,
